@@ -112,6 +112,10 @@ if 'repair_transit_maps_from_meta' not in transit:
     die("transit health check must repair missing/drifted .map files from .meta during long-running cron checks")
 if '.transit-map-repair.' not in transit:
     die("transit .map health repair must use temporary files/snapshots for rollback")
+if 'disable_packaged_nginx_default_site' not in transit:
+    die("transit install must disable Debian nginx default site to avoid extra port 80 listeners")
+if 'NGINX_DEFAULT_SITE_DISABLED_FLAG' not in transit:
+    die("transit default-site disable must leave a marker for uninstall restore")
 
 def between(text: str, start: str, end: str, name: str) -> str:
     i = text.find(start)

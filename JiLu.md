@@ -1454,3 +1454,39 @@
   - 本轮未重新 DD 全新安装；继续通过小时巡检观察 `.meta/.map` 是否保持一致、证书续期 cron 是否持续无错误。
 - Commit:
   - 待提交 `fix: repair transit route maps in health check v6.24`
+
+## 2026-05-23 第 35 轮 - v6.25
+
+- 主笔：Codex/GPT-5.5
+- 审查者：心跳自动化实机巡检；主笔裁决。
+- 本轮目标：修复中转机额外监听 Debian Nginx 默认 80 站点的问题。
+- 接受意见：
+  - 实机巡检发现中转机 Nginx 除 TCP 443 stream 和本地 `127.0.0.1:9999` 黑洞外，还监听 `0.0.0.0:80` 与 `[::]:80`。
+  - 代码证据：`install_transit.sh` 安装 Nginx 后未禁用 Debian 默认站点；落地脚本已有类似禁用逻辑，中转脚本缺失该最小防护。
+- 拒绝意见：
+  - 不改中转 stream 架构、不开放任何新端口、不新增服务；本轮只移除包默认站点软链，避免与“只做 443 中转”的契约冲突。
+  - 不在本轮修改 SSH IPv6 监听；当前中转机 `global_v6_count=0`，没有公网 IPv6 业务地址，先记录观察，避免在巡检中扩大改动面。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转新增 `disable_packaged_nginx_default_site()`，检测 Debian 默认站点软链并禁用，留下脚本标记。
+  - 中转新增 `restore_packaged_nginx_default_site()`，卸载时仅在存在脚本标记时恢复默认站点软链。
+  - 本地静态不变量新增检查，防止后续误删中转默认站点禁用逻辑。
+  - 已在中转机现场禁用默认站点并重启 Nginx；复查 80 端口不再监听，443 与 `127.0.0.1:9999` 正常。
+  - 两脚本版本统一提升到 `v6.25`；落地脚本仅同步版本，业务逻辑不变。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+  - 实机验证：中转机 `nginx -t` 通过，Nginx active；监听只剩 SSH、TCP 443 和 `127.0.0.1:9999`；`.meta/.map` 仍为 `missing_map:0`；TCP 443 ACCEPT 与 UDP 443 DROP 均存在。
+- 残留风险：
+  - 本轮未重新 DD 全新安装；继续通过小时巡检观察中转默认站点是否保持禁用、IPv6 是否仍无公网地址。
+- Commit:
+  - 待提交 `fix: disable transit nginx default site v6.25`

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.24.sh — 中转机安装脚本 v6.24
+# install_transit_v6.25.sh — 中转机安装脚本 v6.25
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.24: 健康检查补齐 .meta→.map 自愈，修复长期运行后路由记录文件缺失。
+# v6.25: 禁用 Debian Nginx 默认站点，避免中转机额外监听 80 端口。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.24"
+readonly VERSION="v6.25"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -33,6 +33,7 @@ readonly FW_CHAIN="TRANSIT-MANAGER"
 readonly LOG_DIR="/var/log/transit-manager"
 readonly LOGROTATE_FILE="/etc/logrotate.d/transit-manager"
 readonly UPDATE_WARN_FILE="/var/run/transit-manager.update.warn"
+readonly NGINX_DEFAULT_SITE_DISABLED_FLAG="${MANAGER_BASE}/.nginx_default_site_disabled_by_script"
 
 _delete_input_refs_to_chain(){
   local _chain="$1" _lines _n
@@ -718,6 +719,7 @@ install_nginx(){
     fi
     success "Nginx 安装完成"
   fi
+  disable_packaged_nginx_default_site
   local _stream_test_conf
   mkdir -p "${MANAGER_BASE}/tmp"
   _stream_test_conf=$(mktemp "${MANAGER_BASE}/tmp/nginx-stream-test.XXXXXX") \
@@ -732,6 +734,33 @@ install_nginx(){
   success "SNI黑洞守卫已配置（127.0.0.1:9999）"
   
   _tune_nginx_worker_connections
+}
+
+disable_packaged_nginx_default_site(){
+  local _link="/etc/nginx/sites-enabled/default"
+  local _target="/etc/nginx/sites-available/default"
+  [[ -L "$_link" && -f "$_target" ]] || return 0
+  if grep -qE 'listen[[:space:]]+(\[::\]:)?80[[:space:]]+default_server' "$_target" 2>/dev/null; then
+    mkdir -p "$MANAGER_BASE"
+    rm -f "$_link" || die "无法禁用 Nginx 默认站点: $_link"
+    : > "$NGINX_DEFAULT_SITE_DISABLED_FLAG" 2>/dev/null || true
+    if ! nginx -t >/dev/null 2>&1; then
+      ln -s "$_target" "$_link" 2>/dev/null || true
+      rm -f "$NGINX_DEFAULT_SITE_DISABLED_FLAG" 2>/dev/null || true
+      die "禁用 Nginx 默认站点后配置校验失败，已回滚"
+    fi
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null \
+      || warn "Nginx 默认站点已禁用，但服务刷新失败；后续配置阶段将再次启动 Nginx"
+    success "已禁用 Nginx 默认站点，避免中转机额外监听 80 端口"
+  fi
+}
+
+restore_packaged_nginx_default_site(){
+  local _link="/etc/nginx/sites-enabled/default"
+  local _target="/etc/nginx/sites-available/default"
+  [[ -f "$NGINX_DEFAULT_SITE_DISABLED_FLAG" && -f "$_target" && ! -e "$_link" ]] || return 0
+  ln -s "$_target" "$_link" 2>/dev/null || warn "无法恢复 Nginx 默认站点软链: $_link"
+  rm -f "$NGINX_DEFAULT_SITE_DISABLED_FLAG" 2>/dev/null || true
 }
 
 _tune_nginx_worker_connections(){
@@ -2320,6 +2349,7 @@ purge_all(){
 
   rm -rf "$SNIPPETS_DIR"
   rm -f  "$NGINX_STREAM_CONF" "$TRANSIT_FALLBACK_CONF"
+  restore_packaged_nginx_default_site
 
   # [v2.10] Post-delete nginx -t: now that files are gone, confirm nginx.conf is still valid.
   # If this fails the fallback is restart (nginx rebuilds its config from scratch).
