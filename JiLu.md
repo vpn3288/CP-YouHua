@@ -1013,3 +1013,33 @@
   - 尚未使用已轮换的新 Cloudflare 最小权限 Token 跑 DNS-01 成功路径、节点连通、中转导入、卸载重装循环。
 - Commit:
   - 本轮提交：`fix: prevalidate transit import token v6.15`
+
+## 2026-05-22 实机测试准备 - v6.15
+
+- 主笔：Codex/GPT-5.5
+- 审查者：本轮未新增脚本审查，仅按心跳推进测试准备。
+- 本轮目标：在 SSH host key 变化尚未确认前，补齐不触碰实机、不保存秘密的实机安装测试清单。
+- 接受意见：
+  - 当前两台实机 22 端口可达，但 SSH host key 已变化；在 VPS 控制台确认指纹前，不应自动覆盖 `known_hosts` 或继续密码登录。
+- 拒绝意见：
+  - 不接受关闭 SSH host key 检查来强行进入安装测试；这会破坏实机测试安全边界。
+- 修改文件：
+  - `tests/real_machine_test_plan.md`
+  - `JiLu.md`
+- 真实改动：
+  - 新增实机安装测试清单，覆盖密钥轮换、SSH host key 核对、本地基线、中转安装错误输入、落地 DNS-01、节点生成/导入、回滚、卸载重装和 DD 重装循环。
+  - 不改两份安装脚本，不涨版本。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash -n tests/local_static_invariants.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+- 残留风险：
+  - 尚未确认两台实机新的 SSH host key 指纹。
+  - 尚未使用已轮换的新 Cloudflare 最小权限 Token 跑完整 DNS-01 与节点连通测试。
+- Commit:
+  - 待提交 `docs: add real machine test plan`
