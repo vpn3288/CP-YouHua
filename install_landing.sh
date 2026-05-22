@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v5.96.sh — 落地机安装脚本 v5.96
+# install_landing_v5.99.sh — 落地机安装脚本 v5.99
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v5.96: 修复额外端口多行持久化、.deleting 自愈和 add_node 证书半状态清理。
+# v5.99: 收紧 fresh install 回滚激活窗口，并拒绝前导零端口绕过互斥检查。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v5.96"
+readonly VERSION="v5.99"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -161,6 +161,63 @@ EOF
   rm -f /etc/cron.d/acme-xray-landing 2>/dev/null || true
 }
 
+read_extra_ports_from_config(){
+  # 兼容 v5.96 前可能写入的多行 EXTRA_PORTS，遇到下一个配置键即停止读取。
+  local _cfg="${1:-$MANAGER_CONFIG}"
+  [[ -f "$_cfg" ]] || return 0
+  awk '
+    /^EXTRA_PORTS=/ { on=1; sub(/^[^=]*=/, ""); print; next }
+    on && /^[A-Z_][A-Z0-9_]*=/ { exit }
+    on { print }
+  ' "$_cfg" 2>/dev/null || true
+}
+
+node_domain_password(){
+  local _nodes_dir="${1:-${MANAGER_BASE}/nodes}" _domain="${2:-}"
+  [[ -d "$_nodes_dir" && -n "$_domain" ]] || return 0
+  python3 - "$_nodes_dir" "$_domain" 2>/dev/null <<'PYNODE'
+import sys
+from pathlib import Path
+
+nodes_dir, target_domain = Path(sys.argv[1]), sys.argv[2]
+for p in nodes_dir.glob("*.conf"):
+    if p.name.startswith(".tmp-node-"):
+        continue
+    data = {}
+    try:
+        for line in p.read_text(encoding="utf-8", errors="strict").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                data[k.strip()] = v.strip()
+    except UnicodeDecodeError:
+        continue
+    if data.get("DOMAIN") == target_domain and data.get("PASSWORD"):
+        print(data["PASSWORD"])
+        break
+PYNODE
+}
+
+node_transit_ip_exists(){
+  local _nodes_dir="${1:-${MANAGER_BASE}/nodes}" _transit_ip="${2:-}"
+  [[ -d "$_nodes_dir" && -n "$_transit_ip" ]] || return 0
+  python3 - "$_nodes_dir" "$_transit_ip" 2>/dev/null <<'PYIP'
+import sys
+from pathlib import Path
+
+nodes_dir, target_ip = Path(sys.argv[1]), sys.argv[2]
+for p in nodes_dir.glob("*.conf"):
+    if p.name.startswith(".tmp-node-"):
+        continue
+    try:
+        for line in p.read_text(errors="replace").splitlines():
+            if line.strip() == f"TRANSIT_IP={target_ip}":
+                print("1")
+                sys.exit(0)
+    except Exception:
+        continue
+PYIP
+}
+
 load_manager_config(){
   local _cfg="${1:-$MANAGER_CONFIG}"
   [[ -f "$_cfg" ]] || return 0
@@ -176,8 +233,8 @@ load_manager_config(){
   mvn=$(grep '^MARKER_VERSION=' "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   ah=$(grep '^ACME_HOME='       "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   bc=$(grep '^BIND_IP='         "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
-  ep=$(grep '^EXTRA_PORTS='     "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
-  [[ -n "$lp" && "$lp" =~ ^[0-9]+$ && $lp -ge 1 && $lp -le 65535 ]] || die "${_cfg} 损坏：LANDING_PORT='${lp:-<空>}' 非法"
+  ep=$(read_extra_ports_from_config "$_cfg")
+  validate_port "$lp" || die "${_cfg} 损坏：LANDING_PORT='${lp:-<空>}' 非法"
   [[ -n "$vu" && "$vu" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || die "${_cfg} 损坏：VLESS_UUID='${vu:-<空>}' 格式非法"
 
   if [[ -n "${mvn:-}" && "$mvn" != "$VERSION" ]]; then
@@ -191,7 +248,7 @@ load_manager_config(){
   LANDING_PORT="$lp"
   VLESS_UUID="$vu"
   for _pf in "$vg" "$vw" "$tt"; do
-    [[ -z "$_pf" || "$_pf" =~ ^[0-9]+$ ]] || die "${_cfg} 损坏：内部端口 '${_pf}' 格式非法"
+    [[ -z "$_pf" ]] || validate_port "$_pf" || die "${_cfg} 损坏：内部端口 '${_pf}' 格式非法"
   done
   [[ "$vg" =~ ^[0-9]+$ ]] && VLESS_GRPC_PORT="$vg" || VLESS_GRPC_PORT=0
   [[ "$vw" =~ ^[0-9]+$ ]] && VLESS_WS_PORT="$vw" || VLESS_WS_PORT=0
@@ -201,12 +258,14 @@ load_manager_config(){
   [[ -n "$ah" ]] && ACME_HOME="$ah" || ACME_HOME="${LANDING_BASE}/acme"
   [[ -n "$bc" ]] && BIND_IP="$bc" || BIND_IP="0.0.0.0"
   EXTRA_PORTS="$(normalize_extra_ports "${ep:-}")"
+  validate_extra_ports_or_die "$EXTRA_PORTS"
   _validate_internal_ports_in_use
 }
 
 save_manager_config(){
   mkdir -p "$MANAGER_BASE"
   EXTRA_PORTS="$(normalize_extra_ports "${EXTRA_PORTS:-}")"
+  validate_extra_ports_or_die "$EXTRA_PORTS"
   atomic_write "$MANAGER_CONFIG" 600 root:root <<MCEOF
 LANDING_PORT=${LANDING_PORT}
 VLESS_UUID=${VLESS_UUID}
@@ -320,8 +379,8 @@ except ValueError:
 }
 
 validate_port(){
-  [[ "$1" =~ ^[0-9]+$ ]] || { error "端口格式非法: $1"; return 1; }
-  (( $1 >= 1 && $1 <= 65535 )) || { error "端口需在 1-65535: $1"; return 1; }
+  [[ "$1" =~ ^[1-9][0-9]*$ ]] || { error "端口格式非法（不允许前导零）: $1"; return 1; }
+  (( 10#$1 >= 1 && 10#$1 <= 65535 )) || { error "端口需在 1-65535: $1"; return 1; }
 }
 
 extra_ports_lines(){
@@ -330,6 +389,25 @@ extra_ports_lines(){
 
 normalize_extra_ports(){
   extra_ports_lines "${1:-}" | paste -sd' ' -
+}
+
+validate_extra_ports_or_die(){
+  local _ports="${1:-}" _ep
+  while IFS= read -r _ep; do
+    [[ -n "$_ep" ]] || continue
+    validate_port "$_ep"
+    [[ "$_ep" != "${LANDING_PORT:-}" ]] \
+      || die "EXTRA_PORTS 不能包含落地代理端口 ${LANDING_PORT}，否则会把代理端口开放给全网"
+  done < <(extra_ports_lines "$_ports")
+}
+
+extra_ports_contains(){
+  local _ports="${1:-}" _needle="${2:-}" _ep
+  [[ -n "$_needle" ]] || return 1
+  while IFS= read -r _ep; do
+    [[ "$_ep" == "$_needle" ]] && return 0
+  done < <(extra_ports_lines "$_ports")
+  return 1
 }
 
 validate_password(){
@@ -1733,7 +1811,7 @@ setup_firewall(){
   if [[ -n "${_TMP_NODE_PATH:-}" && -f "${_TMP_NODE_PATH:-}" ]]; then
     _conf_files+=("$_TMP_NODE_PATH")
   fi
-  local expected_count=${#_conf_files[@]} skipped=0 tips=()
+  local skipped=0 tips=()
   for meta in "${_conf_files[@]+${_conf_files[@]}}"; do
     [[ -f "$meta" ]] || continue
     local tip; tip=$(grep '^TRANSIT_IP=' "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}')
@@ -1773,8 +1851,10 @@ setup_firewall(){
     || _fw_die "添加 SSH 放行规则失败"
   # [L-CRITICAL-1] 1Panel/Docker额外端口放行
   local _extra_ports="${EXTRA_PORTS:-}" _saved_extra="" _extra_cfg="${_STAGED_MANAGER_CONFIG:-$MANAGER_CONFIG}"
-  [[ -f "$_extra_cfg" ]] && _saved_extra=$(grep '^EXTRA_PORTS=' "$_extra_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
+  [[ -f "$_extra_cfg" ]] && _saved_extra=$(read_extra_ports_from_config "$_extra_cfg")
   [[ -n "$_saved_extra" ]] && _extra_ports="$_saved_extra"
+  _extra_ports="$(normalize_extra_ports "$_extra_ports")"
+  validate_extra_ports_or_die "$_extra_ports"
   if [[ -n "$_extra_ports" ]]; then
     while IFS= read -r _ep; do
       [[ -n "$_ep" ]] || continue
@@ -1890,8 +1970,10 @@ _persist_iptables(){
 
   # [v5.21-CRITICAL-2] 1Panel/Docker额外端口持久化
   local _extra_ports="${EXTRA_PORTS:-}" _saved_extra="" _extra_cfg="${_STAGED_MANAGER_CONFIG:-$MANAGER_CONFIG}"
-  [[ -f "$_extra_cfg" ]] && _saved_extra=$(grep '^EXTRA_PORTS=' "$_extra_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
+  [[ -f "$_extra_cfg" ]] && _saved_extra=$(read_extra_ports_from_config "$_extra_cfg")
   [[ -n "$_saved_extra" ]] && _extra_ports="$_saved_extra"
+  _extra_ports="$(normalize_extra_ports "$_extra_ports")"
+  validate_extra_ports_or_die "$_extra_ports"
   if [[ -n "$_extra_ports" ]]; then
     while IFS= read -r _ep; do
       [[ -n "$_ep" ]] || continue
@@ -2119,30 +2201,7 @@ add_node(){
   done
 
   local existing_pass=""
-  # [Fix-4] Replace fragile grep-l|xargs pipeline with Python structured index lookup.
-  # Shell pipelines silently pass empty on malformed/missing files; Python fails loudly on bad data.
-  if [[ -d "${MANAGER_BASE}/nodes" ]]; then
-    existing_pass=$(python3 - "${MANAGER_BASE}/nodes" "$NEW_DOMAIN" 2>/dev/null <<'PYNODE'
-import sys
-from pathlib import Path
-nodes_dir, target_domain = Path(sys.argv[1]), sys.argv[2]
-for p in nodes_dir.glob("*.conf"):
-    if p.name.startswith(".tmp-node-"):
-        continue
-    data = {}
-    try:
-        for line in p.read_text(encoding='utf-8', errors='strict').splitlines():
-            if "=" in line:
-                k, v = line.split("=", 1)
-                data[k.strip()] = v.strip()
-    except UnicodeDecodeError:
-        continue
-    if data.get("DOMAIN") == target_domain and data.get("PASSWORD"):
-        print(data["PASSWORD"])
-        break
-PYNODE
-) || true
-  fi
+  existing_pass=$(node_domain_password "${MANAGER_BASE}/nodes" "$NEW_DOMAIN") || true
   if [[ -n "$existing_pass" ]]; then
     # [R17 Fix] If user provided a different password than existing, die
     if [[ -n "${NEW_PASS:-}" && "$NEW_PASS" != "$existing_pass" ]]; then
@@ -2153,10 +2212,12 @@ PYNODE
     info "  自动沿用密码: ${NEW_PASS}"
   else
     # [L1-UX-1-FIX] 密码输入添加重试循环
+    local _pass_was_auto=0
     while true; do
       read -rp "Trojan 密码（16位以上，直接回车自动生成）: " NEW_PASS
       if [[ -z "$NEW_PASS" ]]; then
         NEW_PASS=$(gen_password)
+        _pass_was_auto=1
         info "  已自动生成高强度密码: ${NEW_PASS}"
         break
       elif validate_password "$NEW_PASS" 2>/dev/null; then
@@ -2180,22 +2241,7 @@ PYNODE
   # BUG-5 FIX + [Fix-4]: Replace find|xargs|grep pipeline with Python structured lookup for transit IP
   local _fw_skip=0
   local _ip_exists
-  _ip_exists=$(python3 - "${MANAGER_BASE}/nodes" "$NEW_TRANSIT" 2>/dev/null <<'PYIP'
-import sys
-from pathlib import Path
-nodes_dir, target_ip = Path(sys.argv[1]), sys.argv[2]
-for p in nodes_dir.glob("*.conf"):
-    if p.name.startswith(".tmp-node-"):
-        continue
-    try:
-        for line in p.read_text(errors="replace").splitlines():
-            if line.strip() == f"TRANSIT_IP={target_ip}":
-                print("1")
-                sys.exit(0)
-    except Exception:
-        continue
-PYIP
-) || true
+  _ip_exists=$(node_transit_ip_exists "${MANAGER_BASE}/nodes" "$NEW_TRANSIT") || true
   if [[ "${_ip_exists:-}" == "1" ]]; then
     warn "中转 IP ${NEW_TRANSIT} 已在防火墙白名单，跳过重复添加 iptables 规则（但仍继续证书申请和 Token 生成）"
     _fw_skip=1
@@ -2217,6 +2263,24 @@ PYIP
 
   # v2.32: 所有用户输入已收集，加锁后才开始写操作
   _acquire_lock
+
+  local _locked_existing_pass _locked_ip_exists
+  _locked_existing_pass=$(node_domain_password "${MANAGER_BASE}/nodes" "$NEW_DOMAIN") || true
+  if [[ -n "$_locked_existing_pass" && "$NEW_PASS" != "$_locked_existing_pass" ]]; then
+    if (( ${_pass_was_auto:-0} )); then
+      warn "域名 ${NEW_DOMAIN} 在等待锁期间已新增节点，自动改为复用既有 Trojan 密码"
+      NEW_PASS="$_locked_existing_pass"
+    else
+      _release_lock
+      die "域名 ${NEW_DOMAIN} 在等待锁期间已新增节点且密码不同，请重新新增并留空以复用既有密码"
+    fi
+  fi
+  _locked_ip_exists=$(node_transit_ip_exists "${MANAGER_BASE}/nodes" "$NEW_TRANSIT") || true
+  if [[ "${_locked_ip_exists:-}" == "1" ]]; then
+    _fw_skip=1
+  else
+    _fw_skip=0
+  fi
 
   # [Fix-B / Doc8-GPT-🟠] Stage manager.conf — write to tmp, commit only after cert+sync+service pass.
   # Committing manager.conf before cert issuance creates a durable half-state on cert failure.
@@ -2262,9 +2326,9 @@ SMEOF
         || die "snapshot existing acme dir failed"
     fi
   fi
-  if ! ( issue_certificate "$NEW_DOMAIN" "$USE_CF_TOKEN" ); then
+  _restore_add_node_cert_state(){
     if (( _existing_domain_refs > 0 )); then
-      warn "证书申请失败，保留 ${NEW_DOMAIN} 既有证书：仍被 ${_existing_domain_refs} 个已提交节点引用"
+      warn "恢复 ${NEW_DOMAIN} 既有证书状态：仍被 ${_existing_domain_refs} 个已提交节点引用"
       if [[ -n "$_cert_snap_dir" && -d "$_cert_snap_dir" ]]; then
         rm -rf "${CERT_BASE:?}/${NEW_DOMAIN:?}" 2>/dev/null || true
         if ! mv -f "$_cert_snap_dir" "${CERT_BASE}/${NEW_DOMAIN}" 2>/dev/null; then
@@ -2288,17 +2352,24 @@ SMEOF
       fi
     fi
     rm -rf "${_cert_snap_dir:-}" "${_acme_snap_dir:-}" 2>/dev/null || true
+  }
+  _cancel_add_node_cert_issue(){
+    local _msg="${1:-证书申请中断，新增节点已取消}"
+    _restore_add_node_cert_state
+    rm -f "${_staged_mgr:-}" 2>/dev/null || true
+    trap - INT TERM
+    _release_lock
+    die "$_msg"
+  }
+  trap '_cancel_add_node_cert_issue "证书申请中断，新增节点已取消并恢复证书状态"' INT TERM
+  if ! ( issue_certificate "$NEW_DOMAIN" "$USE_CF_TOKEN" ); then
+    trap - INT TERM
+    _restore_add_node_cert_state
     rm -f "${_staged_mgr:-}" 2>/dev/null || true
     _release_lock; die "证书申请或安装失败，新增节点已取消"
   fi
+  trap - INT TERM
   rm -rf "${_cert_snap_dir:-}" "${_acme_snap_dir:-}" 2>/dev/null || true
-  local PUB_IP="${PUB_IP:-}"
-  [[ -n "$PUB_IP" ]] || PUB_IP=$(get_public_ip)
-
-  # 提前计算最终节点文件路径（与 save_node_info 内部逻辑对齐）
-  local _safe_dom; _safe_dom=$(printf '%s' "$NEW_DOMAIN" | tr '.:/' '___')
-  local _safe_ip;  _safe_ip=$(printf '%s' "$NEW_TRANSIT" | tr '.:' '__')
-  local _node_conf="${MANAGER_BASE}/nodes/${_safe_dom}_${_safe_ip}.conf"
 
   # [F1] Ghost cert guard: check if other committed node files still use this domain.
   # Revoking a cert shared by multiple transit nodes would break live connections on all of them.
@@ -2325,6 +2396,14 @@ SMEOF
     die "$_msg"
   }
   trap '_cancel_add_node_before_trap "新增节点中断，已清理证书半状态"' INT TERM
+
+  local PUB_IP="${PUB_IP:-}"
+  [[ -n "$PUB_IP" ]] || PUB_IP=$(get_public_ip) || _cancel_add_node_before_trap "公网 IPv4 获取失败，新增节点已取消"
+
+  # 提前计算最终节点文件路径（与 save_node_info 内部逻辑对齐）
+  local _safe_dom; _safe_dom=$(printf '%s' "$NEW_DOMAIN" | tr '.:/' '___')
+  local _safe_ip;  _safe_ip=$(printf '%s' "$NEW_TRANSIT" | tr '.:' '__')
+  local _node_conf="${MANAGER_BASE}/nodes/${_safe_dom}_${_safe_ip}.conf"
 
   # 临时节点用隐藏前缀，只通过 _TMP_NODE_PATH 显式加入本轮事务。
   _tmp_node=$(mktemp "${MANAGER_BASE}/nodes/.tmp-node-XXXXXX.conf") \
@@ -2532,6 +2611,13 @@ delete_node(){
     trap - INT TERM ERR
     _release_lock; warn "节点已恢复，请检查: journalctl -u ${LANDING_SVC}"
   else
+    # 先提交删除事务，再清理证书；避免 SIGKILL 后 .deleting 自愈复活已删证书的节点。
+    if ! rm -f "$_snap_node" "${_snap_cfg_del:-}" "${DEL_CONF}.deleting" 2>/dev/null; then
+      __delete_node_trap_active=0
+      trap - INT TERM ERR
+      _release_lock
+      die "删除事务标记清理失败，拒绝继续清理证书"
+    fi
     # Transaction confirmed: now safe to delete cert (service is running without it)
     if (( remaining == 0 )); then
       info "域名 ${DEL_DOMAIN} 已无中转机，清理证书..."
@@ -2541,8 +2627,6 @@ delete_node(){
       fi
       rm -rf "${CERT_BASE:?}/${DEL_DOMAIN:?}" 2>/dev/null || true
     fi
-    # Both _snap_node and .deleting can now be removed — transaction succeeded
-    rm -f "$_snap_node" "${_snap_cfg_del:-}" "${DEL_CONF}.deleting" 2>/dev/null || true
     __delete_node_trap_active=0
     trap - INT TERM ERR
     _release_lock
@@ -2582,6 +2666,9 @@ do_set_port(){
   if [[ "$new_port" == "$LANDING_PORT" ]]; then
     success "端口已是 ${new_port}，无需变更"; return
   fi
+  EXTRA_PORTS="$(normalize_extra_ports "${EXTRA_PORTS:-}")"
+  extra_ports_contains "$EXTRA_PORTS" "$new_port" \
+    && die "额外端口列表已包含新落地代理端口 ${new_port}，请先从 EXTRA_PORTS 移除该端口"
   ss -tlnp 2>/dev/null | grep -q ":${new_port} " && die "端口 ${new_port} 已被占用"
   local old_port="$LANDING_PORT"
 
@@ -2627,8 +2714,6 @@ do_set_port(){
     systemctl reset-failed "$LANDING_SVC" 2>/dev/null || true
     systemctl restart "$LANDING_SVC" 2>/dev/null || true
     rm -f "$_snap_mgr" "${_snap_cfg:-}" "${_snap_fw:-}" 2>/dev/null || true
-    # [M1 Fix] Clean up snapshot file to prevent disk leakage
-    rm -f "${_snap_fw:-}" 2>/dev/null || true
     LANDING_PORT="$old_port"
     _release_lock
   }
@@ -3018,10 +3103,6 @@ purge_all(){
     "${ACME_HOME}/acme.sh" --uninstall-cronjob 2>/dev/null || true
   fi
 
-  # BUG #33 FIX: Read CREATED_USER before deleting MANAGER_BASE
-  local _created_user="0"
-  _created_user=$(grep '^CREATED_USER=' "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
-
   systemctl stop    "$LANDING_SVC" 2>/dev/null || true
   systemctl disable "$LANDING_SVC" 2>/dev/null || true
   systemctl stop --no-block "$LANDING_SVC" 2>/dev/null || true
@@ -3281,7 +3362,7 @@ fresh_install(){
       PUB_IP="${LANDING_AUTO_PUBLIC_IP:-${FAKE_IP}}"
       validate_ipv4 "$PUB_IP"
     else
-      PUB_IP=$(get_public_ip)
+	      PUB_IP=""
     fi
     info "检测到无头静默安装模式，已跳过交互输入"
   else
@@ -3357,24 +3438,31 @@ fresh_install(){
         break  # 空输入合法
       fi
       
-      local _invalid=0
-      while IFS= read -r _port; do
-        [[ -n "$_port" ]] || continue
-        if ! [[ "$_port" =~ ^[0-9]+$ ]] || (( _port < 1 || _port > 65535 )); then
-          warn "无效端口: $_port（必须是 1-65535 之间的数字）"
+	      local _invalid=0
+	      while IFS= read -r _port; do
+	        [[ -n "$_port" ]] || continue
+        if ! validate_port "$_port" 2>/dev/null; then
+          warn "无效端口: $_port（必须是 1-65535 之间的数字，且不允许前导零）"
           _invalid=1
           break
-        fi
-      done < <(extra_ports_lines "$EXTRA_PORTS")
-      
-      if (( _invalid == 0 )); then
-        break  # 所有端口合法
-      fi
+	        fi
+	      done < <(extra_ports_lines "$EXTRA_PORTS")
+
+	      if (( _invalid == 0 )); then
+	        EXTRA_PORTS="$(normalize_extra_ports "$EXTRA_PORTS")"
+	        if extra_ports_contains "$EXTRA_PORTS" "$LANDING_PORT"; then
+	          warn "额外端口不能包含落地代理端口 ${LANDING_PORT}，请重新输入"
+	          echo "请重新输入..."
+	          continue
+	        fi
+	        break  # 所有端口合法
+	      fi
       echo "请重新输入..."
     done
   fi
 
   EXTRA_PORTS="$(normalize_extra_ports "${EXTRA_PORTS:-}")"
+  validate_extra_ports_or_die "$EXTRA_PORTS"
 
   if (( _headless )); then
     CONFIRM="y"
@@ -3424,7 +3512,7 @@ fresh_install(){
     _release_lock; _fresh_lock_acquired=0
     die "端口 ${LANDING_PORT} 已被占用，请重新运行安装"
   }
-  __LANDING_FRESH_INSTALL_TRAP_ACTIVE=1
+  __LANDING_FRESH_INSTALL_TRAP_ACTIVE=0
   
   # [BUG-6 FIX] Define rollback function BEFORE setting trap
   _fresh_install_rollback(){
@@ -3486,61 +3574,85 @@ fresh_install(){
     warn "[rollback] 完成，可安全重新运行安装"
   }
   
-  trap '_fresh_install_rollback' ERR
-  trap '_fresh_install_rollback; exit 130' INT TERM
-  optimize_kernel_network; create_system_user; install_xray_binary
+	  # 若存在旧 manager.conf，先决定是否复用旧端口，再执行安装二进制/公网探测等副作用。
+	  if [[ -f "$MANAGER_CONFIG" ]]; then
+	    local _exist_uuid; _exist_uuid=$(grep '^VLESS_UUID='       "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
+	    local _exist_port; _exist_port=$(grep '^LANDING_PORT='     "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
+	    local _exist_vg;   _exist_vg=$(grep   '^VLESS_GRPC_PORT='  "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
+	    local _exist_vw;   _exist_vw=$(grep   '^VLESS_WS_PORT='    "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
+	    local _exist_tt;   _exist_tt=$(grep   '^TROJAN_TCP_PORT='  "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
+	    if [[ -n "$_exist_uuid" && -n "$_exist_port" ]]; then
+	      warn "检测到已有安装记录（manager.conf），复用旧配置以保持订阅有效"
+	      warn "  UUID: ${_exist_uuid}  主端口: ${_exist_port}"
+	      if (( _headless )); then
+	        warn "无头模式：自动复用已有 UUID 和端口（如存在）"
+	        VLESS_UUID="$_exist_uuid"
+	        LANDING_PORT="$_exist_port"
+	        [[ "$_exist_vg" =~ ^[0-9]+$ ]] && VLESS_GRPC_PORT="$_exist_vg"   || true
+	        [[ "$_exist_vw" =~ ^[0-9]+$ ]] && VLESS_WS_PORT="$_exist_vw"     || true
+	        [[ "$_exist_tt" =~ ^[0-9]+$ ]] && TROJAN_TCP_PORT="$_exist_tt"   || true
+	        success "已复用旧 UUID 和端口，现有订阅链接继续有效"
+	      else
+	        read -rp "  复用旧配置？[Y/n]: " _reuse_ans
+	      fi
+	      if (( ! _headless )) && [[ ! "${_reuse_ans:-Y}" =~ ^[Nn]$ ]]; then
+	        VLESS_UUID="$_exist_uuid"
+	        LANDING_PORT="$_exist_port"
+	        [[ "$_exist_vg" =~ ^[0-9]+$ ]] && VLESS_GRPC_PORT="$_exist_vg"   || true
+	        [[ "$_exist_vw" =~ ^[0-9]+$ ]] && VLESS_WS_PORT="$_exist_vw"     || true
+	        [[ "$_exist_tt" =~ ^[0-9]+$ ]] && TROJAN_TCP_PORT="$_exist_tt"   || true
+	        success "已复用旧 UUID 和端口，现有订阅链接继续有效"
+	      elif (( ! _headless )); then
+	        warn "  将生成全新 UUID（旧订阅链接将全部失效！）"
+	        VLESS_UUID=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null) \
+	          || VLESS_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true) \
+	          || VLESS_UUID=$(uuidgen 2>/dev/null) \
+	          || die "无法生成 UUID（python3 uuid、/proc/sys/kernel/random/uuid、uuidgen 均失败）"
+	      fi
+	    fi
+	  else
+	    VLESS_UUID=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null) \
+	      || VLESS_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true) \
+	      || VLESS_UUID=$(uuidgen 2>/dev/null) \
+	      || die "无法生成 UUID（python3 uuid、/proc/sys/kernel/random/uuid、uuidgen 均失败）"
+	  fi
+		  if ! validate_port "$LANDING_PORT" 2>/dev/null; then
+		    _release_lock; _fresh_lock_acquired=0
+		    die "复用后的落地端口 ${LANDING_PORT} 非法，请检查旧 manager.conf"
+		  fi
+		  if extra_ports_contains "$EXTRA_PORTS" "$LANDING_PORT"; then
+		    _release_lock; _fresh_lock_acquired=0
+		    die "EXTRA_PORTS 不能包含落地代理端口 ${LANDING_PORT}，否则会把代理端口开放给全网"
+		  fi
+		  ss -tlnp 2>/dev/null | grep -qE ":${LANDING_PORT}\b" && {
+		    _release_lock; _fresh_lock_acquired=0
+		    die "端口 ${LANDING_PORT} 已被占用，请重新运行安装"
+		  }
+	  local _VGRPC="${VLESS_GRPC_PORT:-0}" _VWS="${VLESS_WS_PORT:-0}" _TTCP="${TROJAN_TCP_PORT:-0}"
+	  if [[ "${VLESS_GRPC_PORT:-0}" == "0" ]]; then
+	    _VGRPC=$(python3 -c "import secrets; b=secrets.randbelow(8000)&~3; print(21000+b)")
+		    _VWS=$(( _VGRPC + 1 )); _TTCP=$(( _VGRPC + 2 ))
+		    VLESS_GRPC_PORT="$_VGRPC"; VLESS_WS_PORT="$_VWS"; TROJAN_TCP_PORT="$_TTCP"
+		  fi
+		  for _fresh_inner_port in "$VLESS_GRPC_PORT" "$VLESS_WS_PORT" "$TROJAN_TCP_PORT"; do
+		    if [[ "${_fresh_inner_port:-0}" != "0" ]] && ! validate_port "$_fresh_inner_port" 2>/dev/null; then
+		      _release_lock; _fresh_lock_acquired=0
+		      die "复用后的内部端口 ${_fresh_inner_port} 非法，请检查旧 manager.conf"
+		    fi
+		  done
+		  if ! ( _validate_internal_ports_in_use ); then
+		    _release_lock; _fresh_lock_acquired=0
+		    die "内部端口预检失败，请检查端口占用后重新运行安装"
+		  fi
+		  __LANDING_FRESH_INSTALL_TRAP_ACTIVE=1
+		  trap '_fresh_install_rollback' ERR
+		  trap '_fresh_install_rollback; exit 130' INT TERM
+		  optimize_kernel_network; create_system_user; install_xray_binary
 
-  local PUB_IP="${PUB_IP:-}"
-  [[ -n "$PUB_IP" ]] || PUB_IP=$(get_public_ip)
+	  local PUB_IP="${PUB_IP:-}"
+	  [[ -n "$PUB_IP" ]] || PUB_IP=$(get_public_ip)
 
-  # BUG-7 FIX: 幂等性保障——若 manager.conf 已存在则复用旧 UUID 和全部端口，避免重跑时订阅全部失效
-  if [[ -f "$MANAGER_CONFIG" ]]; then
-    local _exist_uuid; _exist_uuid=$(grep '^VLESS_UUID='       "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
-    local _exist_port; _exist_port=$(grep '^LANDING_PORT='     "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
-    local _exist_vg;   _exist_vg=$(grep   '^VLESS_GRPC_PORT='  "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
-    local _exist_vw;   _exist_vw=$(grep   '^VLESS_WS_PORT='    "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
-    local _exist_tt;   _exist_tt=$(grep   '^TROJAN_TCP_PORT='  "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
-    if [[ -n "$_exist_uuid" && -n "$_exist_port" ]]; then
-      warn "检测到已有安装记录（manager.conf），复用旧配置以保持订阅有效"
-      warn "  UUID: ${_exist_uuid}  主端口: ${_exist_port}"
-      if (( _headless )); then
-        warn "无头模式：自动复用已有 UUID 和端口（如存在）"
-        VLESS_UUID="$_exist_uuid"
-        LANDING_PORT="$_exist_port"
-        [[ "$_exist_vg" =~ ^[0-9]+$ ]] && VLESS_GRPC_PORT="$_exist_vg"   || true
-        [[ "$_exist_vw" =~ ^[0-9]+$ ]] && VLESS_WS_PORT="$_exist_vw"     || true
-        [[ "$_exist_tt" =~ ^[0-9]+$ ]] && TROJAN_TCP_PORT="$_exist_tt"   || true
-        success "已复用旧 UUID 和端口，现有订阅链接继续有效"
-      else
-        read -rp "  复用旧配置？[Y/n]: " _reuse_ans
-      fi
-      if (( ! _headless )) && [[ ! "${_reuse_ans:-Y}" =~ ^[Nn]$ ]]; then
-        # 复用全部旧配置：UUID + 主端口 + 内部3个端口（保证 Xray config 不变）
-        VLESS_UUID="$_exist_uuid"
-        LANDING_PORT="$_exist_port"
-        [[ "$_exist_vg" =~ ^[0-9]+$ ]] && VLESS_GRPC_PORT="$_exist_vg"   || true
-        [[ "$_exist_vw" =~ ^[0-9]+$ ]] && VLESS_WS_PORT="$_exist_vw"     || true
-        [[ "$_exist_tt" =~ ^[0-9]+$ ]] && TROJAN_TCP_PORT="$_exist_tt"   || true
-        success "已复用旧 UUID 和端口，现有订阅链接继续有效"
-      elif (( ! _headless )); then
-        warn "  将生成全新 UUID（旧订阅链接将全部失效！）"
-        VLESS_UUID=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null)           || VLESS_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true) || VLESS_UUID=$(uuidgen 2>/dev/null) || die "无法生成 UUID（python3 uuid、/proc/sys/kernel/random/uuid、uuidgen 均失败）"
-      fi
-    fi
-  else
-    VLESS_UUID=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null)       || VLESS_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true) || VLESS_UUID=$(uuidgen 2>/dev/null) || die "无法生成 UUID（python3 uuid、/proc/sys/kernel/random/uuid、uuidgen 均失败）"
-  fi
-
-  # 只在端口为默认值0时才重新分配（复用路径已赋值，新装路径仍随机分配）
-  local _VGRPC="${VLESS_GRPC_PORT:-0}" _VWS="${VLESS_WS_PORT:-0}" _TTCP="${TROJAN_TCP_PORT:-0}"
-  if [[ "${VLESS_GRPC_PORT:-0}" == "0" ]]; then
-    _VGRPC=$(python3 -c "import secrets; b=secrets.randbelow(8000)&~3; print(21000+b)")
-    _VWS=$(( _VGRPC + 1 )); _TTCP=$(( _VGRPC + 2 ))
-    VLESS_GRPC_PORT="$_VGRPC"; VLESS_WS_PORT="$_VWS"; TROJAN_TCP_PORT="$_TTCP"
-  fi
-  _validate_internal_ports_in_use
-
-  mkdir -p "$LANDING_BASE"
+	  mkdir -p "$LANDING_BASE"
 
   # [Fix-A / Doc8-GPT-🔴] Transaction trap already registered above
 

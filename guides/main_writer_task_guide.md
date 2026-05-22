@@ -16,10 +16,10 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前已上传脚本事实：
 
-- 当前远端提交: `28256df docs: add multi-ai optimization guides`
+- 当前远端提交: `1868017 fix: harden landing transaction recovery v5.96`
 - 中转脚本当前文件名: `install_transit.sh`
 - 落地脚本当前文件名: `install_landing.sh`
-- 两脚本头部版本: `v5.96`
+- 两脚本头部版本: `v5.99`
 - 中转脚本约 2400 行。
 - 落地脚本约 3678 行。
 - 当前本地 Windows 工作区可能检出为 CRLF，`bash -n` 会在 `die() {\r` 报错。
@@ -111,13 +111,13 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 ## 4. 当前脚本架构事实
 
-主笔每轮必须重新读取脚本，以下事实只描述当前 `v5.96` 脚本。
+主笔每轮必须重新读取脚本，以下事实只描述当前 `v5.99` 脚本。
 
 ### 4.1 中转脚本事实
 
 当前中转脚本头部写明：
 
-- `install_transit_v5.96.sh`
+- `install_transit_v5.99.sh`
 - 架构：CN2 GIA 纯 IPv4 中转机。
 - Nginx stream SNI 盲传。
 - 禁止代理核心和 IPv6 业务路径。
@@ -162,12 +162,12 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前落地脚本头部写明：
 
-- `install_landing_v5.96.sh`
+- `install_landing_v5.99.sh`
 - 架构：美国落地机。
 - Xray-core 4 协议单端口回落。
 - Cloudflare DNS-01 证书。
 - 禁止 IPv6 业务路径。
-- 当前版本说明：修复额外端口多行持久化、`.deleting` 自愈和 `add_node` 证书半状态清理。
+- 当前版本说明：收紧 fresh install 回滚激活窗口，并拒绝前导零端口绕过互斥检查。
 
 关键结构：
 
@@ -313,7 +313,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 每次真实优化后，两脚本版本必须统一递增。
 
-当前基线是 `v5.96`。下一轮真实优化应统一为 `v5.97`。默认真实修复要涨版本。
+当前基线是 `v5.99`。下一轮真实优化应统一为 `v6.00`。默认真实修复要涨版本。
 
 同步范围：
 

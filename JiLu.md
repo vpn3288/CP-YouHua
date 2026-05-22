@@ -235,3 +235,143 @@
   - 已做静态验证和最小解析复现，未做 Debian 12 实机首装、iptables 真实链路验证、Cloudflare DNS-01 申请、`.conf.deleting` SIGKILL 注入恢复或同域名证书恢复故障注入。
 - Commit:
   - 本次三轮合并提交：`fix: harden landing transaction recovery v5.96`
+
+## 2026-05-22 第 7 轮 - v5.97
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决 v5.96 后新审查意见，继续收紧落地额外端口、节点删除和新增节点事务路径；不改协议、不改中转业务逻辑。
+- 接受意见：
+  - WSL Codex P1：`add_node()` 在加锁前读取同域名密码和中转 IP 状态，等待锁期间若其他实例增删节点，可能造成同域名 Trojan 密码不一致或错误跳过防火墙重建。
+  - WSL Codex P2：首装 `EXTRA_PORTS` 包含落地代理端口时，旧逻辑会拖到防火墙阶段才失败，浪费依赖安装和证书申请流程。
+  - WSL Codex P2：`JiLu.md` 未记录当前 v5.97，README、脚本和指南版本已前进但追溯记录断层。
+  - WSL Codex 精简建议：`do_set_port()` 回滚路径连续清理同一个 `_snap_fw`，第二次 `rm -f` 属于重复清理。
+- 改写后接受：
+  - 新增节点并发修复未把全局锁扩大到用户输入阶段，而是在 `_acquire_lock` 后复核同域名密码与中转 IP 是否仍存在，避免长时间交互占用写锁。
+- 拒绝意见：
+  - WSL Claude P2：给中转脚本补 `EXTRA_PORTS` 验证，拒绝。当前中转脚本架构固定只开放 SSH 与 TCP 443，不存在 `EXTRA_PORTS` 配置入口；为未来假设添加未调用函数会增加死代码。
+  - WSL Claude P3：`delete_node()` 的 `remaining` 计算移到 rename 前，拒绝。本轮 v5.97 正是依赖 rename 后 `*.conf` 视图计算剩余已提交节点数量，当前行为正确。
+  - WSL Claude P3：给 `read_extra_ports_from_config()` 增加注释，暂缓。该 awk 逻辑短且已由函数名表达旧多行读取用途，本轮优先处理真实行为风险。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地脚本新增 `read_extra_ports_from_config()`，能读取旧 `manager.conf` 中跨多行的 `EXTRA_PORTS`，并在读取、保存、防火墙运行态和持久化前统一规范化并校验。
+  - 落地脚本新增 `validate_extra_ports_or_die()`，禁止 1Panel/Docker 额外端口列表包含当前落地代理端口，避免把代理端口开放给全网。
+  - `do_set_port()` 在切换落地代理端口前检查新端口是否已在 `EXTRA_PORTS` 中，防止端口角色冲突。
+  - `delete_node()` 在服务重启确认成功后先清理 `.deleting` 和事务快照，再清理证书，避免 SIGKILL 后自愈复活已失去证书的节点。
+  - `add_node()` 将公网 IP 获取纳入证书半状态清理 trap；同时在锁内复核同域名密码和中转 IP 状态，等待锁期间发生节点变更时以最新真相源为准。
+  - `fresh_install()` 在确认安装前以及复用旧 `manager.conf` 端口后校验 `EXTRA_PORTS`，尽早拒绝包含落地代理端口的输入。
+  - 删除 `do_set_port()` 回滚路径中重复的 `_snap_fw` 清理。
+  - 删除 `purge_all()` 中未使用的 `_created_user` 读取；卸载路径已按实际用户存在性清理，不依赖该废弃变量。
+  - 两脚本版本统一提升到 `v5.97`；中转脚本仅同步版本号。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+  - `rg -n 'v5\.97|第 7 轮|validate_extra_ports_or_die|node_domain_password|node_transit_ip_exists|read_extra_ports_from_config' install_landing.sh install_transit.sh README.md guides/main_writer_task_guide.md guides/reviewer_task_guide.md JiLu.md`
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 实机首装、iptables 真实链路验证、Cloudflare DNS-01 申请、新增节点并发注入、删除节点 SIGKILL 注入或 1Panel/Docker 端口实测。
+- Commit:
+  - 随第 9 轮真实优化统一提交；如用户要求立即上传，则本轮先自审 diff 后提交推送。
+
+## 2026-05-22 第 8 轮 - v5.98
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决 v5.97 新审查意见，优先修复新增同域名节点证书申请中断恢复和额外端口冲突输入体验，不改协议、不改防火墙边界。
+- 接受意见：
+  - WSL Codex P1：`add_node()` 在同域名已有节点时，证书申请前虽快照旧证书和 acme 登记，但 `issue_certificate()` 期间 Ctrl-C 会绕过后续清理 trap，可能丢失旧域名续期登记。
+  - WSL Codex P2：交互式首装中 `EXTRA_PORTS` 包含当前落地代理端口时，格式循环会放行，随后 `validate_extra_ports_or_die` 直接退出，不能让用户重新输入。
+  - WSL Codex P2：复用旧 `manager.conf` 的旧落地端口后才发现 `EXTRA_PORTS` 冲突，失败点在安装二进制和公网 IP 探测之后，回滚成本过高。
+  - WSL Codex 精简建议：`setup_firewall()` 的 `expected_count` 未被使用，可删除。
+  - WSL Claude P3：`read_extra_ports_from_config()` 是迁移兼容逻辑，补一行注释能降低后续误删风险。
+- 改写后接受：
+  - 旧 `manager.conf` 复用校验未整体重构 fresh install，只把复用决策、最终端口检查、内部端口分配和 `EXTRA_PORTS` 校验移动到安装二进制、创建用户和公网 IP 探测之前。
+- 拒绝意见：
+  - WSL Codex 精简建议：删除 `CREATED_USER` 字段，暂缓。该字段仍在 `manager.conf` 读写和暂存配置中作为旧状态兼容字段存在；卸载虽不依赖它，但贸然删除会扩大配置兼容影响。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - `add_node()` 新增证书申请阶段的早期 INT/TERM trap；同域名已有节点时中断会恢复旧证书目录和 `${ACME_HOME}/${domain}_ecc`，无既有引用时清理新证书半状态。
+  - `fresh_install()` 的交互式额外端口输入循环会规范化端口后检查是否包含当前 `LANDING_PORT`，冲突时提示并重新输入。
+  - `fresh_install()` 将旧 `manager.conf` 复用决策、最终 `LANDING_PORT` 占用检查、内部端口分配和 `EXTRA_PORTS` 校验提前到安装二进制/创建用户/公网 IP 探测之前。
+  - 删除 `setup_firewall()` 未使用的 `expected_count` 变量。
+  - 给 `read_extra_ports_from_config()` 补充旧多行 `EXTRA_PORTS` 迁移注释。
+  - 两脚本版本统一提升到 `v5.98`；中转脚本仅同步版本号。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+  - `shellcheck -S error install_transit.sh install_landing.sh`
+  - `rg -n 'v5\.98|第 8 轮|_restore_add_node_cert_state|_cancel_add_node_cert_issue|expected_count|当前版本' install_landing.sh install_transit.sh README.md guides/main_writer_task_guide.md guides/reviewer_task_guide.md JiLu.md`
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 实机首装、Cloudflare DNS-01 申请中断注入、旧 `manager.conf` 复用故障注入、iptables 真实链路验证或 1Panel/Docker 端口实测。
+- Commit:
+  - 随第 9 轮真实优化统一提交；如用户要求立即上传，则先自审 diff 后提交推送。
+
+## 2026-05-22 第 9 轮 - v5.99
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决 v5.98 新审查意见，修复 fresh install 预检失败误触发全量回滚和端口前导零绕过问题，并完成第 7-9 轮合并提交推送。
+- 接受意见：
+  - WSL Codex P1：v5.98 将旧 `manager.conf` 复用和最终端口校验前移后，仍在 fresh rollback 激活窗口内；`EXTRA_PORTS` 冲突或端口占用早失败会误删旧 `manager.conf`、节点和证书目录。
+  - WSL Codex P1：`validate_port()` 允许 `0443`，字符串比较和 `ss :0443` 占用检查会被绕过，而 Xray 配置生成会把它转为整数 `443`。
+  - WSL Codex P2：headless 模式仍先探测公网 IP，再做旧 `manager.conf` 复用后的本地冲突校验，断网时会掩盖本地可确定错误。
+  - WSL Codex 精简建议：端口规范化后，防火墙额外端口循环里的重复端口格式校验可以后续删除；本轮先修风险点。
+- 改写后接受：
+  - 端口前导零未自动规范成十进制，而是直接拒绝；这样不会把用户输入的 `0443` 静默变成 `443`，更适合小白安装错误提示。
+  - fresh install 回滚窗口未删除，只把 `__LANDING_FRESH_INSTALL_TRAP_ACTIVE=1` 和 trap 注册移动到预检完成后、安装二进制/创建用户等副作用开始前。
+- 拒绝意见：
+  - WSL Claude P2：继续加强 `read_extra_ports_from_config()` 注释，拒绝。本轮 v5.98 已补明确迁移注释，继续加注释收益小。
+  - WSL Claude P3：指南里 `setup_firewall_transit()` 名称与实现不一致，暂缓。该项是指南陈述漂移，不影响脚本执行；本轮优先处理安装状态风险。
+  - WSL Claude P3：删除 `CREATED_USER` 字段，继续暂缓。该字段仍作为旧配置兼容读写存在。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - `validate_port()` 改为拒绝前导零端口，并用 `10#` 十进制算术范围检查，避免 `0443` 绕过字符串比较和占用检测。
+  - `load_manager_config()` 对 `LANDING_PORT` 和内部端口复用 `validate_port()`，旧配置中的前导零端口会明确报错。
+  - `fresh_install()` 在旧 `manager.conf` 复用、`EXTRA_PORTS` 冲突、最终端口占用和内部端口预检全部完成后，才激活 fresh rollback trap。
+  - fresh 预检失败会释放安装锁并退出，不会调用 `_fresh_install_rollback()` 删除旧 `manager.conf`、节点或证书目录。
+  - headless 模式不再提前调用 `get_public_ip`；只有显式提供 `LANDING_AUTO_PUBLIC_IP`/`FAKE_IP` 时立即校验，否则延迟到本地预检之后探测。
+  - 两脚本版本统一提升到 `v5.99`；中转脚本仅同步版本号。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+  - `shellcheck -S error install_transit.sh install_landing.sh`
+  - `rg -n 'v5\.99|第 9 轮|validate_port|__LANDING_FRESH_INSTALL_TRAP_ACTIVE|LANDING_AUTO_PUBLIC_IP|当前版本' install_landing.sh install_transit.sh README.md guides/main_writer_task_guide.md guides/reviewer_task_guide.md JiLu.md`
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 实机首装、旧 `manager.conf` 故障注入、Cloudflare DNS-01 申请中断注入、iptables 真实链路验证或 1Panel/Docker 端口实测。
+- Commit:
+  - 本次三轮合并提交：`fix: harden landing install recovery v5.99`
