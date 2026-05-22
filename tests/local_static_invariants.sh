@@ -180,6 +180,10 @@ if 'validate_ipv4 "$pub_ip" || die' not in landing:
     die("print_pairing_info does not enforce real public IPv4 token IP")
 if 'ip.is_private' not in transit:
     die("transit token pre-parse does not reject private IP addresses")
+if 'type=tcp&alpn=http/1.0' not in transit or 'type=tcp&alpn=http/1.0' not in landing:
+    die("Trojan-TCP links must use explicit alpn=http/1.0")
+if 'type=tcp&alpn=#{urllib.parse.quote' in transit or 'type=tcp&alpn="\\n' in landing:
+    die("Trojan-TCP links must not emit empty alpn")
 
 print(f"OK: static invariants for {tv}")
 PY

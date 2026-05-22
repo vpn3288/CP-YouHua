@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.19.sh — 落地机安装脚本 v6.19
+# install_landing_v6.20.sh — 落地机安装脚本 v6.20
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.19: 同步中转完整导入命令解析修复版本；落地业务逻辑不变。
+# v6.20: Trojan-TCP 节点链接改用 alpn=http/1.0，服务端配置不变。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.19"
+readonly VERSION="v6.20"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -3347,8 +3347,10 @@ uris = [
      f"?encryption=none&security=tls&sni={domain}&fp={fp_ws}"
      f"&type=ws&path=%2F{pfx}-vw&host={domain}&alpn=http/1.1"
      f"#{urllib.parse.quote(lbl_vws+domain)}"),
+    # Trojan-TCP 使用 http/1.0 ALPN：主入口没有 http/1.0 专用 fallback，
+    # 会落入 Trojan catch-all；避免空 alpn 参数在部分客户端中不可用。
     (f"trojan://{urllib.parse.quote(trojan_pass)}@{transit_ip}:{port}"
-     f"?security=tls&sni={domain}&fp={fp_tcp}&type=tcp&alpn="
+     f"?security=tls&sni={domain}&fp={fp_tcp}&type=tcp&alpn=http/1.0"
      f"#{urllib.parse.quote(lbl_ttcp+domain)}"),
 ]
 print(base64.b64encode("\n".join(uris).encode()).decode())

@@ -1269,3 +1269,39 @@
   - 本轮修复已本地复现并覆盖静态用例，但还需用户在中转机重新拉取最新版后再次粘贴完整导入命令验证。
 - Commit:
   - 本提交 `fix: parse full transit import command v6.19`（最终 hash 以 `git log -1` 为准）
+
+## 2026-05-23 第 30 轮 - v6.20
+
+- 主笔：Codex/GPT-5.5
+- 审查者：用户实机反馈；主笔进入中转机与落地机做只读诊断。
+- 本轮目标：修复 Trojan-TCP 节点不通，但其他三个协议正常的问题。
+- 接受意见：
+  - 用户实机反馈：VLESS Vision、VLESS gRPC、VLESS WS 正常，Trojan-TCP 不通。
+  - 主笔只读诊断：落地 Xray 主入口、Trojan 内部 inbound、fallback catch-all、防火墙白名单均存在；从中转机直连落地 8443 与从落地机经中转 443 回落地，Trojan 协议握手均能拿到 HTTP 响应，服务端链路本身可通。
+  - 结论：问题更符合客户端订阅参数兼容性问题；原链接输出 `alpn=` 空值，部分客户端会解析成异常或自动补默认 ALPN。
+- 拒绝意见：
+  - 不改服务端 fallback 结构，不新增 Trojan-gRPC，不开放落地端口给全网；服务端已验证可通，最小修复是调整客户端链接参数。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转订阅生成与落地配对信息中的 Trojan-TCP 链接从空 `alpn=` 改为显式 `alpn=http/1.0`。
+  - 现有服务端 TLS ALPN 已包含 `http/1.0`，且主入口没有 `http/1.0` 专用 fallback，因此会落入 Trojan catch-all；避开 `h2` 的 gRPC fallback 和 `http/1.1` 的 WS fallback。
+  - 本地静态不变量新增 Trojan-TCP 链接必须显式 `alpn=http/1.0`、不得输出空 `alpn` 的检查。
+  - 两脚本版本统一提升到 `v6.20`。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash -n tests/local_static_invariants.sh`
+  - `bash -n tests/pre_real_machine_local_gate.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+- 残留风险：
+  - 本轮已验证服务器端 Trojan 链路可通，但还需要用户用客户端重新导入 v6.20 生成的订阅或手动把 Trojan-TCP 节点 ALPN 改成 `http/1.0` 后复测。
+- Commit:
+  - 待提交 `fix: use http10 alpn for trojan tcp v6.20`
