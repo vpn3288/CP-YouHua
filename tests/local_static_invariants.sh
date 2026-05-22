@@ -96,6 +96,14 @@ if f"install_transit_{tv}.sh" not in transit:
     die("transit header version mismatch")
 if f"install_landing_{lv}.sh" not in landing:
     die("landing header version mismatch")
+if 'while iptables -w 2 -D INPUT -m comment --comment' in transit + landing:
+    die("iptables comment-only deletion can leave swap jump residue after chain rename")
+if 'while ip6tables -w 2 -D INPUT -m comment --comment' in landing:
+    die("ip6tables comment-only deletion can leave swap jump residue after chain rename")
+if 'stale_swap_line=$(iptables -w 2 -L INPUT --line-numbers -n' not in transit:
+    die("transit health check does not clean stale firewall swap jump by line number")
+if 'stale_swap_line=$($tool -w 2 -L INPUT --line-numbers -n' not in landing:
+    die("landing health check does not clean stale firewall swap jump by line number")
 
 def between(text: str, start: str, end: str, name: str) -> str:
     i = text.find(start)

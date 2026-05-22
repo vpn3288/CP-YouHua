@@ -72,13 +72,13 @@
 
 ## 3. 当前脚本事实
 
-审查者每轮必须重新读取脚本，以下事实只描述当前 v6.21 脚本。
+审查者每轮必须重新读取脚本，以下事实只描述当前 v6.22 脚本。
 
 ### 3.1 中转脚本
 
 当前头部：
 
-- `install_transit_v6.21.sh`
+- `install_transit_v6.22.sh`
 - CN2 GIA 纯 IPv4 中转机。
 - Nginx stream SNI 盲传。
 - 禁止代理核心和 IPv6 业务路径。
@@ -116,7 +116,7 @@
 
 当前头部：
 
-- `install_landing_v6.21.sh`
+- `install_landing_v6.22.sh`
 - 美国 IPv4 落地机。
 - Xray-core 4 协议单端口回落。
 - Cloudflare DNS-01 证书。

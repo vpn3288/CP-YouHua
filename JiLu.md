@@ -1344,3 +1344,42 @@
   - 需要用户客户端重新测试 Trojan-TCP；服务端已应用同等临时修复，脚本提交后会上传最新版保持后续重建不回退。
 - Commit:
   - 待提交 `fix: constrain h2 fallback for trojan tcp v6.21`
+
+## 2026-05-23 第 32 轮 - v6.22
+
+- 主笔：Codex/GPT-5.5
+- 审查者：心跳自动化实机巡检；主笔裁决。
+- 本轮目标：修复影响长期运行的健康检查误判和防火墙蓝绿切换临时跳转残留。
+- 接受意见：
+  - 心跳巡检发现中转机 Nginx/Xray 核心服务在线，但中转机每 30 分钟由 `transit-health` 误报防火墙规则与 Nginx 配置异常，并触发 Nginx restart，journal 出现周期性 `nginx.service: Failed with result 'timeout'`。
+  - 实机防火墙发现中转机 `INPUT` 残留 `transit-manager-swap`，落地机 `INPUT` 残留 `xray-landing-swap`；两者都是蓝绿切换临时跳转，成功切换后不应长期存在。
+  - 代码证据：脚本使用 `iptables -D INPUT -m comment --comment ...` 删除临时规则，规则目标在 `iptables -E` 链重命名后已变化，comment-only 删除不能可靠命中，导致残留。
+- 拒绝意见：
+  - 不新增守护进程、不改变协议、不开放落地端口；本轮只修健康检查和防火墙清理的确定性问题。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 两脚本新增按行号删除 INPUT 中指定 comment 规则的清理函数，替换原先不可靠的 comment-only `iptables -D` 删除方式。
+  - 中转健康检查改用 `iptables -S/-C` 判断 443 TCP/UDP 和 INPUT 跳转，避免 `iptables -L` 输出格式差异导致误判。
+  - 中转与落地健康检查都会清理残留的 swap 临时跳转，防止蓝绿切换后 INPUT 链长期漂移。
+  - 本轮已在两台服务器现场用行号方式清理现有 swap 残留。
+  - 两脚本版本统一提升到 `v6.22`。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+  - 实机巡检：中转 Nginx active、443/9999 监听、`.meta/.map` 一致；落地 Xray/Nginx active、8443 与内部回环端口监听、证书剩余约 89 天。
+- 残留风险：
+  - 本轮为现场巡检和静态验证，未重新 DD 全新安装；下一轮心跳继续观察中转机是否还出现周期性 `transit-health` 误报和 Nginx timeout。
+- Commit:
+  - 待提交 `fix: clean firewall swap residue v6.22`

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.21.sh — 中转机安装脚本 v6.21
+# install_transit_v6.22.sh — 中转机安装脚本 v6.22
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.21: 同步落地 h2 fallback 精确匹配修复版本；中转业务逻辑不变。
+# v6.22: 修复健康检查误判和防火墙蓝绿切换 swap 跳转残留清理。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.21"
+readonly VERSION="v6.22"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -37,6 +37,13 @@ readonly UPDATE_WARN_FILE="/var/run/transit-manager.update.warn"
 _delete_input_refs_to_chain(){
   local _chain="$1" _lines _n
   mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$_chain" '$2==c {print $1}' | sort -rn)
+  for _n in "${_lines[@]}"; do
+    iptables -w 2 -D INPUT "$_n" 2>/dev/null || true
+  done
+}
+_delete_input_refs_by_comment(){
+  local _comment="$1" _lines _n
+  mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="/* ${_comment} */" 'index($0,c){print $1}' | sort -rn)
   for _n in "${_lines[@]}"; do
     iptables -w 2 -D INPUT "$_n" 2>/dev/null || true
   done
@@ -1071,22 +1078,29 @@ elif ! ss -H -tln 2>/dev/null | awk '$4=="127.0.0.1:9999"{ok=1} END{exit !ok}'; 
 fi
 
 # 检查TCP 443规则
-if ! iptables -L TRANSIT-MANAGER -n 2>/dev/null | grep -q "ACCEPT.*tcp.*dpt:443"; then
+if ! iptables -w 2 -S TRANSIT-MANAGER 2>/dev/null | grep -q -- "-p tcp .*--dport 443 .* -j ACCEPT"; then
   logger -t transit-health "防火墙443规则丢失,尝试恢复"
   /etc/transit_manager/firewall-restore.sh 2>/dev/null || true
 fi
 
 # 检查UDP 443 DROP规则（QUIC防护）
-if ! iptables -L TRANSIT-MANAGER -n 2>/dev/null | grep -q "DROP.*udp.*dpt:443"; then
+if ! iptables -w 2 -C TRANSIT-MANAGER -p udp --dport 443 -m comment --comment "transit-manager-rule" -j DROP 2>/dev/null; then
   logger -t transit-health "防火墙UDP 443规则丢失,尝试恢复"
   /etc/transit_manager/firewall-restore.sh 2>/dev/null || true
 fi
 
 # 检查INPUT跳转规则
-if ! iptables -L INPUT -n 2>/dev/null | grep -q "TRANSIT-MANAGER"; then
+if ! iptables -w 2 -S INPUT 2>/dev/null | grep -q -- "-j TRANSIT-MANAGER"; then
   logger -t transit-health "INPUT跳转规则丢失,尝试恢复"
   /etc/transit_manager/firewall-restore.sh 2>/dev/null || true
 fi
+
+while :; do
+  stale_swap_line=$(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk 'index($0,"/* transit-manager-swap */"){print $1; exit}')
+  [ -n "${stale_swap_line:-}" ] || break
+  logger -t transit-health "清理防火墙临时swap跳转残留"
+  iptables -w 2 -D INPUT "$stale_swap_line" 2>/dev/null || break
+done
 
 # 检查 Nginx 配置完整性
 if ! nginx -t 2>/dev/null; then
@@ -1187,7 +1201,7 @@ _bulldoze_input_refs_t(){
   _prev_term_trap=$(trap -p TERM || true)
   _fw_transit_rollback(){
     _bulldoze_input_refs_t "$FW_TMP"
-    while iptables -w 2 -D INPUT -m comment --comment "transit-manager-swap" 2>/dev/null; do :; done
+    _delete_input_refs_by_comment "transit-manager-swap"
     _bulldoze_input_refs_t "$FW_CHAIN"
     if iptables -w 2 -S "$FW_OLD" >/dev/null 2>&1; then
       iptables -w 2 -F "$FW_CHAIN" 2>/dev/null || true
@@ -1271,7 +1285,7 @@ _bulldoze_input_refs_t(){
   fi
   iptables -w 2 -C "$FW_CHAIN" -p udp --dport "$LISTEN_PORT" -m comment --comment "transit-manager-rule" -j DROP \
     || { _fw_transit_rollback; _restore_prev_traps; die "UDP 443 DROP 规则未生效，拒绝提交防火墙状态"; }
-  while iptables -w 2 -D INPUT -m comment --comment "transit-manager-swap" 2>/dev/null; do :; done
+  _delete_input_refs_by_comment "transit-manager-swap"
   iptables -w 2 -F "$FW_OLD" 2>/dev/null || true
   iptables -w 2 -X "$FW_OLD" 2>/dev/null || true
   _restore_prev_traps
@@ -1337,8 +1351,15 @@ _bulldoze_input_refs(){
       iptables -w 2 -D INPUT "$_n" 2>/dev/null || true
     done
   }
+_delete_input_refs_by_comment(){
+  local _comment="$1" _lines _n
+  mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="/* ${_comment} */" 'index($0,c){print $1}' | sort -rn)
+  for _n in "${_lines[@]}"; do
+    iptables -w 2 -D INPUT "$_n" 2>/dev/null || true
+  done
+}
 _rollback(){
-  while iptables -w 2 -D INPUT -m comment --comment "transit-manager-swap" 2>/dev/null; do :; done
+  _delete_input_refs_by_comment "transit-manager-swap"
   _bulldoze_input_refs __FW_CHAIN__
   if iptables -w 2 -S __FW_CHAIN__-OLD >/dev/null 2>&1; then
     iptables -w 2 -F __FW_CHAIN__ 2>/dev/null || true
@@ -1381,7 +1402,7 @@ iptables -w 2 -E __FW_CHAIN__-NEW __FW_CHAIN__ 2>/dev/null || {
   exit 1
 }
 iptables -w 2 -I INPUT 1 -m comment --comment "transit-manager-rule" -j __FW_CHAIN__
-while iptables -w 2 -D INPUT -m comment --comment "transit-manager-swap" 2>/dev/null; do :; done
+_delete_input_refs_by_comment "transit-manager-swap"
 iptables -w 2 -F __FW_CHAIN__-OLD 2>/dev/null || true
 iptables -w 2 -X __FW_CHAIN__-OLD 2>/dev/null || true
 """

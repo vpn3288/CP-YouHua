@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.21.sh — 落地机安装脚本 v6.21
+# install_landing_v6.22.sh — 落地机安装脚本 v6.22
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.21: h2 fallback 精确匹配 gRPC serviceName path，避免 Trojan-TCP 被误分流到 gRPC。
+# v6.22: 修复防火墙蓝绿切换 swap 跳转残留清理并纳入健康检查。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.21"
+readonly VERSION="v6.22"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -76,6 +76,20 @@ _emit_update_warning(){
     cat "$UPDATE_WARN_FILE" 2>/dev/null || true
   fi
   rm -f "$UPDATE_WARN_FILE" 2>/dev/null || true
+}
+_delete_input_refs_by_comment(){
+  local _comment="$1" _lines _n
+  mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="/* ${_comment} */" 'index($0,c){print $1}' | sort -rn)
+  for _n in "${_lines[@]}"; do
+    iptables -w 2 -D INPUT "$_n" 2>/dev/null || true
+  done
+}
+_delete_input6_refs_by_comment(){
+  local _comment="$1" _lines _n
+  mapfile -t _lines < <(ip6tables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="/* ${_comment} */" 'index($0,c){print $1}' | sort -rn)
+  for _n in "${_lines[@]}"; do
+    ip6tables -w 2 -D INPUT "$_n" 2>/dev/null || true
+  done
 }
 # Gemini: EXIT 覆盖 die() 路径，确保快照/临时文件不泄漏（Inode 保护）
 trap '_emit_update_warning; _global_cleanup' EXIT
@@ -1670,6 +1684,17 @@ if ! python3 -c "import json,sys; json.load(open('/etc/xray-landing/config.json'
   exit 0
 fi
 
+for swap_comment in xray-landing-swap xray-landing-v6-swap; do
+  tool=iptables
+  [ "$swap_comment" = "xray-landing-v6-swap" ] && tool=ip6tables
+  while :; do
+    stale_swap_line=$($tool -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="/* ${swap_comment} */" 'index($0,c){print $1; exit}')
+    [ -n "${stale_swap_line:-}" ] || break
+    logger -t xray-health "清理防火墙临时swap跳转残留: ${swap_comment}"
+    $tool -w 2 -D INPUT "$stale_swap_line" 2>/dev/null || break
+  done
+done
+
 # 检查证书有效期
 for cert in /etc/xray-landing/certs/*/fullchain.pem; do
   [ -f "$cert" ] || continue
@@ -1984,7 +2009,7 @@ setup_firewall(){
   _prev_int_trap=$(trap -p INT || true)
   _prev_term_trap=$(trap -p TERM || true)
   _fw_landing_rollback(){
-    iptables -w 2  -D INPUT -m comment --comment "xray-landing-swap"    2>/dev/null || true
+    _delete_input_refs_by_comment "xray-landing-swap"
     _bulldoze_input_refs "$FW_CHAIN"
     if iptables -w 2 -S "$FW_OLD" >/dev/null 2>&1; then
       iptables -w 2 -F "$FW_CHAIN" 2>/dev/null || true
@@ -1999,7 +2024,7 @@ setup_firewall(){
     fi
     iptables -w 2  -F "$FW_TMP"  2>/dev/null || true
     iptables -w 2  -X "$FW_TMP"  2>/dev/null || true
-    ip6tables -w 2 -D INPUT -m comment --comment "xray-landing-v6-swap" 2>/dev/null || true
+    _delete_input6_refs_by_comment "xray-landing-v6-swap"
     _bulldoze_input_refs6 "$FW_CHAIN6"
     if ip6tables -w 2 -S "$FW_OLD6" >/dev/null 2>&1; then
       ip6tables -w 2 -F "$FW_CHAIN6" 2>/dev/null || true
@@ -2132,7 +2157,7 @@ setup_firewall(){
   iptables -w 2 -I INPUT 1 -m comment --comment "xray-landing-jump" -j "$FW_CHAIN" \
     || _fw_die "插入防火墙正式跳转规则失败"
 
-  while iptables -w 2 -D INPUT -m comment --comment "xray-landing-swap" 2>/dev/null; do :; done
+  _delete_input_refs_by_comment "xray-landing-swap"
 
   if have_ipv6; then
     ip6tables -w 2 -N "$FW_TMP6" 2>/dev/null || ip6tables -w 2 -F "$FW_TMP6"
@@ -2155,7 +2180,7 @@ setup_firewall(){
       || { _fw_landing_rollback; _restore_prev_fw_traps; die "IPv6 防火墙链重命名失败，运行链已回滚"; }
     _fw_swapped6=1
     ip6tables -w 2 -I INPUT 1 -m comment --comment "xray-landing-v6-jump" -j "$FW_CHAIN6"
-    while ip6tables -w 2 -D INPUT -m comment --comment "xray-landing-v6-swap" 2>/dev/null; do :; done
+    _delete_input6_refs_by_comment "xray-landing-v6-swap"
   fi
 
   # v2.37 GPT: trap 保持活跃直到 _persist_iptables 成功，防运行链/开机链分裂
@@ -2285,8 +2310,18 @@ _bulldoze_input_refs6(){
     mapfile -t _lines < <(ip6tables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$_chain" '$2==c {print $1}' | sort -rn)
     for _n in "${_lines[@]}"; do ip6tables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
 }
+_delete_input_refs_by_comment(){
+  local _comment="$1" _lines _n
+  mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="/* ${_comment} */" 'index($0,c){print $1}' | sort -rn)
+  for _n in "${_lines[@]}"; do iptables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
+}
+_delete_input6_refs_by_comment(){
+  local _comment="$1" _lines _n
+  mapfile -t _lines < <(ip6tables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="/* ${_comment} */" 'index($0,c){print $1}' | sort -rn)
+  for _n in "${_lines[@]}"; do ip6tables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
+}
 _rollback(){
-  while iptables -w 2 -D INPUT -m comment --comment 'xray-landing-swap' 2>/dev/null; do :; done
+  _delete_input_refs_by_comment 'xray-landing-swap'
   _bulldoze_input_refs __FW_CHAIN__
   if iptables -w 2 -S __FW_CHAIN__-OLD >/dev/null 2>&1; then
     iptables -w 2 -F __FW_CHAIN__ 2>/dev/null || true
@@ -2300,7 +2335,7 @@ _rollback(){
   iptables -w 2 -X __FW_CHAIN__-NEW 2>/dev/null || true
 }
 _rollback6(){
-  while ip6tables -w 2 -D INPUT -m comment --comment 'xray-landing-v6-swap' 2>/dev/null; do :; done
+  _delete_input6_refs_by_comment 'xray-landing-v6-swap'
   _bulldoze_input_refs6 __FW_CHAIN6__
   if ip6tables -w 2 -S __FW_CHAIN6__-OLD >/dev/null 2>&1; then
     ip6tables -w 2 -F __FW_CHAIN6__ 2>/dev/null || true
@@ -2329,7 +2364,7 @@ iptables -w 2 -E __FW_CHAIN__-NEW __FW_CHAIN__ 2>/dev/null || {
   exit 1
 }
 iptables -w 2 -I INPUT 1 -m comment --comment 'xray-landing-jump' -j __FW_CHAIN__
-while iptables -w 2 -D INPUT -m comment --comment 'xray-landing-swap' 2>/dev/null; do :; done
+_delete_input_refs_by_comment 'xray-landing-swap'
 iptables -w 2 -F __FW_CHAIN__-OLD 2>/dev/null || true
 iptables -w 2 -X __FW_CHAIN__-OLD 2>/dev/null || true
 if [ -f /proc/net/if_inet6 ] && command -v ip6tables >/dev/null 2>&1 && ip6tables -nL >/dev/null 2>&1 && [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo 1)" != "1" ]; then
@@ -2357,7 +2392,7 @@ if [ -f /proc/net/if_inet6 ] && command -v ip6tables >/dev/null 2>&1 && ip6table
     exit 1
   }
   ip6tables -w 2 -I INPUT 1 -m comment --comment 'xray-landing-v6-jump' -j __FW_CHAIN6__
-  while ip6tables -w 2 -D INPUT -m comment --comment 'xray-landing-v6-swap' 2>/dev/null; do :; done
+  _delete_input6_refs_by_comment 'xray-landing-v6-swap'
   ip6tables -w 2 -F __FW_CHAIN6__-OLD 2>/dev/null || true
   ip6tables -w 2 -X __FW_CHAIN6__-OLD 2>/dev/null || true
 fi
