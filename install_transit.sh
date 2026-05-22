@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.16.sh — 中转机安装脚本 v6.16
+# install_transit_v6.18.sh — 中转机安装脚本 v6.18
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.16: 导入 token 预解析拒绝畸形 JSON，避免坏 token 触发安装副作用。
+# v6.18: 同步落地 DNS 占位记录能力版本；中转业务逻辑不变。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.16"
+readonly VERSION="v6.18"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -211,7 +211,7 @@ validate_ipv4(){
 ip = sys.stdin.read().strip()
 try:
     a = ipaddress.IPv4Address(ip)
-    if a.is_loopback or a.is_link_local or a.is_multicast or a.is_reserved or a.is_unspecified:
+    if a.is_private or a.is_loopback or a.is_link_local or a.is_multicast or a.is_reserved or a.is_unspecified:
         sys.exit(1)
 except:
     sys.exit(1)
@@ -1711,16 +1711,70 @@ extract_import_token_json_no_deps(){
   printf '%s' "$decoded" | grep -Eq '^[[:space:]]*\{.*\}[[:space:]]*$' \
     || die "token 解码后不是 JSON 对象，请重新从落地机复制完整 token"
   if command -v python3 >/dev/null 2>&1; then
-    printf '%s' "$decoded" | python3 -c "
+    printf '%s' "$decoded" | ALLOW_LEGACY_ROUTE_ONLY="${ALLOW_LEGACY_ROUTE_ONLY:-no}" python3 -c "
 import json
+import ipaddress
+import os
+import re
 import sys
 d = json.loads(sys.stdin.read())
 if not isinstance(d, dict) or not d.get('ip') or not d.get('dom'):
     raise SystemExit(1)
-" 2>/dev/null || die "token 预校验失败（JSON 畸形或 ip/dom 字段缺失）——请重新从落地机复制完整的导入命令"
+try:
+    ip = ipaddress.IPv4Address(str(d.get('ip')).strip())
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+        raise ValueError()
+except Exception:
+    raise SystemExit(1)
+dom = str(d.get('dom')).strip().lower()
+if not (4 <= len(dom) <= 253 and '.' in dom):
+    raise SystemExit(1)
+if not re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]{2,}', dom):
+    raise SystemExit(1)
+port = str(d.get('port', 443)).strip()
+if not re.fullmatch(r'[1-9][0-9]*', port) or not (1 <= int(port) <= 65535):
+    raise SystemExit(1)
+uuid = str(d.get('uuid', '')).strip()
+pwd = str(d.get('pwd', '')).strip()
+pfx = str(d.get('pfx', '')).strip()
+if not uuid or not pwd or not pfx:
+    if os.environ.get('ALLOW_LEGACY_ROUTE_ONLY', 'no') != 'yes':
+        raise SystemExit(1)
+else:
+    if not re.fullmatch(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', uuid):
+        raise SystemExit(1)
+    if len(pwd) < 16:
+        raise SystemExit(1)
+" 2>/dev/null || die "token 预校验失败（JSON 畸形或 ip/dom/port/uuid/pwd 字段非法）——请重新从落地机复制完整的导入命令"
   else
-    printf '%s' "$decoded" | grep -Eq '^[[:space:]]*\{[[:space:]]*"ip"[[:space:]]*:[[:space:]]*"[^"]+"[[:space:]]*,[[:space:]]*"dom"[[:space:]]*:[[:space:]]*"[^"]+"([[:space:]]*,[[:space:]]*"[A-Za-z0-9_]+"[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+))*[[:space:]]*\}[[:space:]]*$' \
-      || die "token 预校验失败（JSON 畸形或 ip/dom 字段缺失）——请重新从落地机复制完整的导入命令"
+    local _oct='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)' _ip_re _dom_re _port_re _uuid_re
+    _ip_re="\"ip\"[[:space:]]*:[[:space:]]*\"${_oct}\\.${_oct}\\.${_oct}\\.${_oct}\""
+    _dom_re='"dom"[[:space:]]*:[[:space:]]*"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\.[A-Za-z0-9]{2,}"'
+    _port_re='"port"[[:space:]]*:[[:space:]]*"?([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])"?'
+    _uuid_re='"uuid"[[:space:]]*:[[:space:]]*"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"'
+    printf '%s' "$decoded" | grep -Eq "$_ip_re" \
+      && printf '%s' "$decoded" | grep -Eq "$_dom_re" \
+      && printf '%s' "$decoded" | grep -Eq "$_port_re" \
+      || die "token 预校验失败（JSON 畸形或 ip/dom/port 字段非法）——请重新从落地机复制完整的导入命令"
+    local _decoded_ip _a _b _c _d
+    _decoded_ip=$(printf '%s' "$decoded" | sed -nE 's/.*"ip"[[:space:]]*:[[:space:]]*"([0-9]{1,3}(\.[0-9]{1,3}){3})".*/\1/p' | head -1)
+    IFS='.' read -r _a _b _c _d <<< "$_decoded_ip"
+    if (( _a == 0 || _a == 10 || _a == 127 || _a >= 224 )) \
+      || (( _a == 100 && _b >= 64 && _b <= 127 )) \
+      || (( _a == 169 && _b == 254 )) \
+      || (( _a == 172 && _b >= 16 && _b <= 31 )) \
+      || (( _a == 192 && _b == 168 )) \
+      || (( _a == 192 && ((_b == 0 && (_c == 0 || _c == 2)) || (_b == 88 && _c == 99)) )) \
+      || (( _a == 198 && (_b == 18 || _b == 19 || (_b == 51 && _c == 100)) )) \
+      || (( _a == 203 && _b == 0 && _c == 113 )); then
+      die "token 预校验失败（ip 不是公网 IPv4）——请重新从落地机复制完整的导入命令"
+    fi
+    if [[ "${ALLOW_LEGACY_ROUTE_ONLY:-no}" != "yes" ]]; then
+      printf '%s' "$decoded" | grep -Eq "$_uuid_re" \
+        && printf '%s' "$decoded" | grep -Eq '"pwd"[[:space:]]*:[[:space:]]*"[^"]{16,}"' \
+        && printf '%s' "$decoded" | grep -Eq '"pfx"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        || die "token 预校验失败（uuid/pwd/pfx 字段非法）——请重新从落地机复制完整的导入命令"
+    fi
   fi
   printf '%s' "$decoded"
 }
@@ -1929,7 +1983,19 @@ delete_landing_route(){
     && meta_count=$(find "$CONF_DIR" -name "*.meta" -type f 2>/dev/null | wc -l) || true
   (( meta_count > 0 )) || { warn "无可删除的落地机"; return; }
 
-  read -rp "请输入要删除的落地机域名（或上方列表中的编号）: " DEL_DOMAIN
+  while true; do
+    read -rp "请输入要删除的落地机域名/编号（q 返回）: " DEL_DOMAIN
+    DEL_DOMAIN=$(trim "$DEL_DOMAIN")
+    [[ "$DEL_DOMAIN" =~ ^[Qq]$ || -z "$DEL_DOMAIN" ]] && { info "已取消"; return; }
+    if [[ "$DEL_DOMAIN" =~ ^[0-9]+$ ]]; then
+      (( DEL_DOMAIN >= 1 && DEL_DOMAIN <= meta_count )) || { error "编号越界（共 ${meta_count} 个），请重新输入"; continue; }
+      break
+    fi
+    if validate_domain "$(tr '[:upper:]' '[:lower:]' <<< "$DEL_DOMAIN")" 2>/dev/null; then
+      break
+    fi
+    error "请输入有效域名或列表编号；输入 q 返回菜单"
+  done
   # v2.32: 确认输入后才加锁，避免等待用户输入时持锁过久
   _acquire_lock
 

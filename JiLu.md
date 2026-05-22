@@ -1118,3 +1118,91 @@
   - 聊天中暴露过的 GitHub Token、Cloudflare Token、服务器密码必须在继续实机写入测试前全部轮换；本轮未使用、未保存、未提交这些秘密。
 - Commit:
   - 待提交 `fix: reject malformed transit import token v6.16`
+
+## 2026-05-22 第 27 轮 - v6.17
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决 v6.16 安装测试前审查意见，修复坏输入副作用、依赖阶段回滚、防火墙漂移和删除误输入体验问题。
+- 接受意见：
+  - 审查者 A P1：中转 token 预解析只校验 JSON 形态，非法 IPv4、非法 UUID、短密码等语义坏 token 仍会在 `import_token()` 的 `check_deps` 前漏过，干净中转机可能先安装依赖再失败。
+  - 审查者 A P1：落地 `fresh_install()` 在 `check_deps` 后才定义和注册 `_fresh_install_rollback()`，如果 nginx 安装后 chrony/cron 验收失败，会留下脚本安装的 nginx、默认站点或标记半状态。
+  - 审查者 B P1：落地新增同中转 IP 节点时 `_fw_skip` 只看节点文件存在，不验证运行链和恢复脚本是否仍放行该 IP/端口；防火墙漂移后新节点可能继续不可达。
+  - 审查者 B P1：删除节点服务重启失败后虽回滚节点文件，但回滚后的服务若仍失败，旧逻辑只警告并返回菜单，可能允许继续写操作。
+  - 审查者 B P2：落地 `--status` 只比较中转 IP 集合，不比较 `LANDING_PORT`，同 IP 旧端口/错端口规则会误报正常。
+  - 审查者 B P2：中转和落地删除输入输错编号直接 `die`，不符合小白输错可重试。
+- 拒绝意见：
+  - 暂缓中转 iptables 删除 helper 精简：方向有维护收益，但当前安装测试阶段优先修真实 P1/P2；该精简涉及卸载/回滚关键路径，需另轮单独验证。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转 `extract_import_token_json_no_deps()` 在依赖安装前完整校验 token 的 IPv4、域名、端口、UUID、密码和路径前缀；语义坏 token 不再触发 `check_deps`。
+  - 落地 `fresh_install()` 在用户确认后、`check_deps` 前注册 `_fresh_install_rollback`，依赖安装/chrony/cron 阶段失败也会清理脚本拥有的 nginx/systemd/firewall/acme 半状态。
+  - 落地新增 `landing_runtime_has_transit_rule()`、`landing_restore_has_transit_rule()` 和 `landing_firewall_has_transit_rule()`；新增同中转 IP 节点只有在运行链和恢复脚本都匹配当前端口时才跳过防火墙重建。
+  - 落地 `--status` 改为逐个节点检查 `${TRANSIT_IP}/32:${LANDING_PORT}` 的运行链和恢复脚本规则，能发现同 IP 端口漂移。
+  - 落地删除节点回滚后若服务仍无法恢复，改为硬失败并拒绝继续菜单写操作。
+  - 中转删除落地路由、落地删除节点的编号/域名选择改为可重试，空输入或 `q` 返回菜单。
+  - 两脚本版本统一提升到 `v6.17`。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash -n tests/local_static_invariants.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+- 残留风险：
+  - 本轮是静态和本地故障注入验证，尚未使用已轮换的新 Cloudflare 最小权限 Token 跑完整 DNS-01、节点连通、中转导入、卸载重装和 DD 重装循环。
+  - 实机写入测试仍需先轮换聊天中暴露过的 GitHub Token、Cloudflare Token 和服务器密码，并核对 SSH host key。
+- Commit:
+  - 待提交 `fix: harden install test edges v6.17`
+
+## 2026-05-22 第 28 轮 - v6.18
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：根据安装测试前审查意见，修复 DNS-01 占位记录、真实公网 IP、重复安装回滚和卸载残留问题。
+- 接受意见：
+  - 审查者 A P1：落地脚本不应读取外部 `PUB_IP` 环境变量生成中转导入 Token；Token 的 `ip` 必须来自实时公网探测或显式 `LANDING_AUTO_PUBLIC_IP`，并复用公网 IPv4 校验。
+  - 审查者 A P1：中转 token 预解析需拒绝私网/保留 IPv4，避免语义坏 token 在安装依赖前漏过。
+  - 审查者 A P2：落地卸载遗漏 `/etc/logrotate.d/xray-landing`，卸载验收也未检查该残留。
+  - 审查者 B P1：落地 fresh install 在重复/并发安装检测前激活破坏性回滚，可能误清理另一个已完成安装。
+  - 审查者 B P1：证书仍有效时只检查 `acme.sh` 存在，不检查 `${domain}_ecc/${domain}.conf` 续期登记，可能留下不会自动续期的长期隐患。
+  - 审查者 B 过度精简提醒：DNS 占位 A 记录删除必须有脚本持久化证据，不能只按域名删除。
+- 拒绝意见：
+  - 不接受把聊天中暴露的 GitHub/Cloudflare Token 写入仓库、脚本或测试日志；实机测试必须使用已轮换的最小权限 Token。
+  - 不接受自动覆盖已有非脚本占位 A 记录；为避免误改用户 DNS，脚本遇到既有非匹配 A 记录会要求换新子域名或手动清理。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地脚本新增可选 `DNS_PLACEHOLDER_IP` / `LANDING_AUTO_DNS_PLACEHOLDER_IP`，在证书申请前创建或复用 Cloudflare 灰云 A 占位记录；占位 IP 只写入 DNS，不写入节点 Token。
+  - 节点文件持久化 `DNS_PLACEHOLDER_IP` 与 `DNS_PLACEHOLDER_RECORD_ID`；删除节点、卸载和 fresh rollback 只在 record id 与占位内容匹配时清理脚本拥有的 A 记录。
+  - 落地 `print_pairing_info()` 改为复用 `validate_ipv4()` 校验 Token IP；fresh/add_node 不再读取外部 `PUB_IP`，只接受显式 `LANDING_AUTO_PUBLIC_IP` 或实时探测公网 IPv4。
+  - 中转 `validate_ipv4()` 与 token 预解析新增私网 IPv4 拒绝；无 `python3` fallback 也拒绝私网、保留和文档地址。
+  - fresh install 的 `.installed` 与端口重复检查移到破坏性 rollback 激活前，避免并发/重复安装误删已完成状态。
+  - 证书早返回要求 acme 域名续期登记存在；仅有有效证书文件但登记缺失时重新走 DNS-01 登记。
+  - 卸载清理与验收补上 `$LOGROTATE_FILE`。
+  - 两脚本版本统一提升到 `v6.18`。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+- 残留风险：
+  - 本轮仍未执行实机 DNS-01、节点连通、中转导入、卸载重装和 DD 重装循环。
+  - 聊天中暴露过的 GitHub Token、Cloudflare Token 和服务器密码必须轮换；本轮未使用、未保存、未提交这些秘密。
+- Commit:
+  - 待提交 `fix: harden dns placeholder and install rollback v6.18`

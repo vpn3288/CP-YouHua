@@ -19,7 +19,7 @@ git ls-files --eol install_transit.sh install_landing.sh README.md JiLu.md guide
   || fail "tracked text files must be LF"
 ok "LF endings"
 
-if git grep -IlE 'ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|cfat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,}|BEGIN (RSA|OPENSSH|EC|PRIVATE) KEY' -- . ':!tests/local_static_invariants.sh' >/tmp/cp-youhua-secret-scan.$$ 2>/dev/null; then
+if git grep -IlE 'ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|cfat_[A-Za-z0-9_]+|cfut_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{20,}|BEGIN (RSA|OPENSSH|EC|PRIVATE) KEY' -- . ':!tests/local_static_invariants.sh' >/tmp/cp-youhua-secret-scan.$$ 2>/dev/null; then
   sed 's/^/secret-like literal in: /' /tmp/cp-youhua-secret-scan.$$ >&2
   rm -f /tmp/cp-youhua-secret-scan.$$
   fail "secret-like literal found"
@@ -45,6 +45,22 @@ fi
 malformed_token=$(printf '%s' '{"ip":,"dom":"example.com"}' | base64 | tr -d '\n')
 if bash -c 'source "$1"; extract_import_token_json_no_deps "$2" >/dev/null' _ "$extractor_tmp" "$malformed_token" 2>/dev/null; then
   fail "malformed JSON token passed pre-parse"
+fi
+bad_ip_token=$(printf '%s' '{"ip":"999.2.3.4","dom":"example.com","port":443,"uuid":"11111111-1111-4111-8111-111111111111","pwd":"abcdefghijklmnop","pfx":"abc"}' | base64 | tr -d '\n')
+if bash -c 'source "$1"; extract_import_token_json_no_deps "$2" >/dev/null' _ "$extractor_tmp" "$bad_ip_token" 2>/dev/null; then
+  fail "semantic invalid IP token passed pre-parse"
+fi
+private_ip_token=$(printf '%s' '{"ip":"10.0.0.1","dom":"example.com","port":443,"uuid":"11111111-1111-4111-8111-111111111111","pwd":"abcdefghijklmnop","pfx":"abc"}' | base64 | tr -d '\n')
+if bash -c 'source "$1"; extract_import_token_json_no_deps "$2" >/dev/null' _ "$extractor_tmp" "$private_ip_token" 2>/dev/null; then
+  fail "private IP token passed pre-parse"
+fi
+bad_uuid_token=$(printf '%s' '{"ip":"1.2.3.4","dom":"example.com","port":443,"uuid":"bad","pwd":"abcdefghijklmnop","pfx":"abc"}' | base64 | tr -d '\n')
+if bash -c 'source "$1"; extract_import_token_json_no_deps "$2" >/dev/null' _ "$extractor_tmp" "$bad_uuid_token" 2>/dev/null; then
+  fail "semantic invalid UUID token passed pre-parse"
+fi
+short_pwd_token=$(printf '%s' '{"ip":"1.2.3.4","dom":"example.com","port":443,"uuid":"11111111-1111-4111-8111-111111111111","pwd":"short","pfx":"abc"}' | base64 | tr -d '\n')
+if bash -c 'source "$1"; extract_import_token_json_no_deps "$2" >/dev/null' _ "$extractor_tmp" "$short_pwd_token" 2>/dev/null; then
+  fail "semantic short password token passed pre-parse"
 fi
 rm -f "$extractor_tmp"
 trap - EXIT
@@ -103,11 +119,13 @@ fresh_preflight = between(transit, 'fresh_install(){', 'check_deps', "transit fr
 if fresh_preflight.find('extract_import_token_json_no_deps "$LANDING_TOKEN" >/dev/null') < 0:
     die("fresh_install does not pre-parse LANDING_TOKEN")
 
-headless_ip = between(landing, 'if [[ -n "${FAKE_IP:-}" ]]; then', 'info "检测到无头静默安装模式', "landing headless IP")
-if 'die "FAKE_IP' not in headless_ip:
-    die("FAKE_IP is not rejected in headless mode")
-if headless_ip.find('die "FAKE_IP') > headless_ip.find('LANDING_AUTO_PUBLIC_IP'):
-    die("FAKE_IP rejection must happen before public IP assignment")
+headless_ip = between(landing, 'DNS_PLACEHOLDER_IP="${LANDING_AUTO_DNS_PLACEHOLDER_IP', 'info "检测到无头静默安装模式', "landing headless IP")
+if 'validate_dns_placeholder_ipv4 "$DNS_PLACEHOLDER_IP"' not in headless_ip:
+    die("headless DNS placeholder IP is not validated")
+if 'validate_ipv4 "$LANDING_AUTO_PUBLIC_IP"' not in headless_ip:
+    die("headless LANDING_AUTO_PUBLIC_IP is not validated as real public IPv4")
+if 'PUB_IP="${LANDING_AUTO_PUBLIC_IP}"' in headless_ip:
+    die("headless preflight should not copy LANDING_AUTO_PUBLIC_IP into ambient PUB_IP")
 
 purge_nginx = between(landing, 'if (( _nginx_installed_by_script )); then', 'rm -rf "$MANAGER_BASE"', "purge_all nginx cleanup")
 if purge_nginx.find('systemctl reload nginx') > purge_nginx.find('restore_packaged_nginx_default_site'):
@@ -118,6 +136,14 @@ if 'systemctl restart nginx' in rollback_nginx:
     die("fresh rollback must not restart user-owned nginx after default-site restore")
 if rollback_nginx.find('systemctl reload nginx') > rollback_nginx.find('restore_packaged_nginx_default_site'):
     die("fresh rollback restores Debian default site before nginx reload")
+
+fresh_landing_precheck = between(landing, '[[ "$CONFIRM" =~ ^[Yy]$ ]]', 'check_deps', "landing fresh dependency precheck")
+if fresh_landing_precheck.find('__LANDING_FRESH_INSTALL_TRAP_ACTIVE=1') < 0:
+    die("landing fresh install does not activate rollback before check_deps")
+if fresh_landing_precheck.find("trap '_fresh_install_rollback' ERR") < 0:
+    die("landing fresh install does not trap dependency-stage ERR before check_deps")
+if fresh_landing_precheck.find('if [[ -f "$INSTALLED_FLAG" ]]') > fresh_landing_precheck.find('__LANDING_FRESH_INSTALL_TRAP_ACTIVE=1'):
+    die("landing fresh install activates destructive rollback before duplicate-install guard")
 
 deleting_block = between(landing, 'name "*.conf.deleting"', '# [v2.9', "landing deleting recovery")
 if deleting_block.find('_acquire_lock') < 0 or deleting_block.find('_release_lock') < 0:
@@ -132,6 +158,25 @@ if service_recovery.find('_release_lock') < service_recovery.find('systemctl res
 collision = between(landing, 'if [[ -f "$_node_conf" ]]; then', 'mv -f "$_tmp_node" "$_node_conf"', "add_node collision")
 if '_cancel_add_node_before_trap "节点文件名碰撞' not in collision:
     die("add_node collision does not use cert-cleaning cancel path")
+
+if 'landing_firewall_has_transit_rule "$NEW_TRANSIT"' not in landing:
+    die("add_node does not verify live+persisted firewall before skipping rebuild")
+if '删除已回滚，但服务仍无法恢复' not in landing:
+    die("delete_node does not hard-fail when rollback cannot restore service")
+if '运行链白名单' not in landing or '恢复脚本白名单' not in landing:
+    die("show_status does not validate transit firewall rule port")
+if 'ensure_cloudflare_placeholder_a_record "$DOMAIN" "$CF_TOKEN" "$DNS_PLACEHOLDER_IP"' not in landing:
+    die("fresh install does not ensure optional DNS placeholder before certificate issue")
+if 'DNS_PLACEHOLDER_RECORD_ID=${dns_record_id}' not in landing:
+    die("node state does not persist DNS placeholder record id")
+if '[[ -z "$record_id" ]] && return 0' not in landing:
+    die("DNS placeholder delete is not guarded by record id")
+if 'rm -f "$LANDING_BIN" "$CERT_RELOAD_SCRIPT" "$LOGROTATE_FILE"' not in landing:
+    die("purge_all does not remove logrotate file")
+if 'validate_ipv4 "$pub_ip" || die' not in landing:
+    die("print_pairing_info does not enforce real public IPv4 token IP")
+if 'ip.is_private' not in transit:
+    die("transit token pre-parse does not reject private IP addresses")
 
 print(f"OK: static invariants for {tv}")
 PY

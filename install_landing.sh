@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.16.sh — 落地机安装脚本 v6.16
+# install_landing_v6.18.sh — 落地机安装脚本 v6.18
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.16: 同步版本号；落地业务逻辑不变。
+# v6.18: 可选管理 Cloudflare 灰云 A 占位记录，避免 DNS-01 域名指向真实落地 IP。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.16"
+readonly VERSION="v6.18"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -87,6 +87,7 @@ VLESS_GRPC_PORT=0
 VLESS_WS_PORT=0
 TROJAN_TCP_PORT=0
 CF_TOKEN="${CF_TOKEN:-}"
+DNS_PLACEHOLDER_IP="${DNS_PLACEHOLDER_IP:-${LANDING_AUTO_DNS_PLACEHOLDER_IP:-}}"
 CREATED_USER="0"
 NGINX_INSTALLED_BY_SCRIPT="0"
 
@@ -226,13 +227,14 @@ load_manager_config(){
   local _cfg="${1:-$MANAGER_CONFIG}"
   [[ -f "$_cfg" ]] || return 0
 
-  local lp vu vg vw tt ct cu mvn ah bc ep
+  local lp vu vg vw tt ct dpi cu mvn ah bc ep
   lp=$(grep '^LANDING_PORT='    "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   vu=$(grep '^VLESS_UUID='      "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   vg=$(grep '^VLESS_GRPC_PORT=' "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   vw=$(grep '^VLESS_WS_PORT='   "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   tt=$(grep '^TROJAN_TCP_PORT=' "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   ct=$(grep '^CF_TOKEN='        "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
+  dpi=$(grep '^DNS_PLACEHOLDER_IP=' "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   cu=$(grep '^CREATED_USER='    "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   mvn=$(grep '^MARKER_VERSION=' "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   ah=$(grep '^ACME_HOME='       "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
@@ -258,6 +260,7 @@ load_manager_config(){
   [[ "$vw" =~ ^[0-9]+$ ]] && VLESS_WS_PORT="$vw" || VLESS_WS_PORT=0
   [[ "$tt" =~ ^[0-9]+$ ]] && TROJAN_TCP_PORT="$tt" || TROJAN_TCP_PORT=0
   [[ -n "$ct" ]] && CF_TOKEN="$ct" || CF_TOKEN=""
+  [[ -n "$dpi" ]] && DNS_PLACEHOLDER_IP="$dpi" || DNS_PLACEHOLDER_IP=""
   [[ -n "$cu" ]] && CREATED_USER="$cu" || CREATED_USER="0"
   [[ -n "$ah" ]] && ACME_HOME="$ah" || ACME_HOME="${LANDING_BASE}/acme"
   [[ -n "$bc" ]] && BIND_IP="$bc" || BIND_IP="0.0.0.0"
@@ -277,6 +280,7 @@ VLESS_GRPC_PORT=${VLESS_GRPC_PORT}
 VLESS_WS_PORT=${VLESS_WS_PORT}
 TROJAN_TCP_PORT=${TROJAN_TCP_PORT}
 CF_TOKEN=${CF_TOKEN}
+DNS_PLACEHOLDER_IP=${DNS_PLACEHOLDER_IP:-}
 CREATED_USER=${CREATED_USER}
 MARKER_VERSION=${VERSION}
 ACME_HOME=${ACME_HOME}
@@ -463,6 +467,151 @@ validate_cf_token(){
   [[ -n "$1" ]] || { error "CF Token 不能为空"; return 1; }
   [[ ${#1} -ge 40 ]] || { error "CF Token 格式疑似有误（长度 ${#1} 位，通常 ≥40 位）"; return 1; }
   [[ "$1" =~ ^[a-zA-Z0-9_-]+$ ]] || { error "CF Token 含非法字符（仅允许字母、数字、_、-）"; return 1; }
+}
+
+validate_dns_placeholder_ipv4(){
+  local ip="$1" a b c d part
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { error "DNS 占位 IPv4 格式非法: $ip"; return 1; }
+  IFS='.' read -r a b c d <<< "$ip"
+  for part in "$a" "$b" "$c" "$d"; do
+    [[ "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] || { error "DNS 占位 IPv4 格式非法: $ip"; return 1; }
+    (( 10#$part >= 0 && 10#$part <= 255 )) || { error "DNS 占位 IPv4 格式非法: $ip"; return 1; }
+  done
+  if (( a == 0 || a == 10 || a == 127 || a >= 224 )); then
+    error "DNS 占位 IPv4 不能是 0/私网/环回/组播地址: $ip"; return 1
+  fi
+  if (( a == 100 && b >= 64 && b <= 127 )); then
+    error "DNS 占位 IPv4 不能是运营商 NAT 地址: $ip"; return 1
+  fi
+  if (( a == 169 && b == 254 )); then
+    error "DNS 占位 IPv4 不能是链路本地地址: $ip"; return 1
+  fi
+  if (( a == 172 && b >= 16 && b <= 31 )); then
+    error "DNS 占位 IPv4 不能是私网地址: $ip"; return 1
+  fi
+  if (( a == 192 && b == 168 )); then
+    error "DNS 占位 IPv4 不能是私网地址: $ip"; return 1
+  fi
+}
+
+cloudflare_find_zone(){
+  local domain="$1" cf_token="$2" _candidate _zone_id
+  while IFS= read -r _candidate; do
+    [[ -n "$_candidate" ]] || continue
+    _zone_id=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+      -H "Authorization: Bearer ${cf_token}" \
+      "https://api.cloudflare.com/client/v4/zones?name=${_candidate}" \
+      2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result'][0]['id'] if d.get('result') else '')" 2>/dev/null) || true
+    if [[ -n "$_zone_id" ]]; then
+      printf '%s\t%s\n' "$_zone_id" "$_candidate"
+      return 0
+    fi
+  done < <(python3 - "$domain" <<'PY'
+import sys
+parts = sys.argv[1].strip(".").split(".")
+for i in range(0, max(len(parts) - 1, 0)):
+    print(".".join(parts[i:]))
+PY
+)
+  return 1
+}
+
+ensure_cloudflare_placeholder_a_record(){
+  local domain="$1" cf_token="$2" placeholder_ip="$3"
+  [[ -z "$placeholder_ip" ]] && return 0
+  validate_dns_placeholder_ipv4 "$placeholder_ip" || return 1
+
+  local _zone_info _zone_id _zone_domain
+  _zone_info=$(cloudflare_find_zone "$domain" "$cf_token") || {
+    error "Cloudflare API Token 验证失败，无法为 ${domain} 管理 DNS 占位 A 记录"
+    return 1
+  }
+  _zone_id="${_zone_info%%$'\t'*}"
+  _zone_domain="${_zone_info#*$'\t'}"
+
+  local _records _parsed _count _rid _content _proxied _payload
+  DNS_PLACEHOLDER_RECORD_ID=""
+  _records=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+    -H "Authorization: Bearer ${cf_token}" \
+    "https://api.cloudflare.com/client/v4/zones/${_zone_id}/dns_records?type=A&name=${domain}&per_page=100" \
+    2>/dev/null) || {
+      error "读取 Cloudflare A 记录失败: ${domain}"
+      return 1
+    }
+  _parsed=$(printf '%s' "$_records" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if not d.get("success", False):
+    raise SystemExit(1)
+for r in d.get("result", []):
+    print("%s\t%s\t%s" % (r.get("id",""), r.get("content",""), str(r.get("proxied", False)).lower()))
+' 2>/dev/null) || {
+    error "解析 Cloudflare A 记录失败: ${domain}"
+    return 1
+  }
+  _count=$(printf '%s\n' "$_parsed" | sed '/^$/d' | wc -l | tr -d ' ')
+  if (( _count > 1 )); then
+    error "${domain} 存在多个 A 记录。为避免误删用户 DNS，请先在 Cloudflare 手动清理到只剩一个，或换新子域名"
+    return 1
+  fi
+  _payload=$(python3 - "$domain" "$placeholder_ip" <<'PY'
+import json, sys
+print(json.dumps({
+    "type": "A",
+    "name": sys.argv[1],
+    "content": sys.argv[2],
+    "ttl": 300,
+    "proxied": False,
+    "comment": "xray-landing DNS placeholder; not origin IP"
+}))
+PY
+)
+  if (( _count == 0 )); then
+    local _created
+    _created=$(curl -fsSL --connect-timeout 5 --max-time 15 -X POST \
+      -H "Authorization: Bearer ${cf_token}" -H "Content-Type: application/json" \
+      --data "$_payload" \
+      "https://api.cloudflare.com/client/v4/zones/${_zone_id}/dns_records" \
+      2>/dev/null) || { error "创建 Cloudflare 灰云 A 占位记录失败: ${domain}"; return 1; }
+    DNS_PLACEHOLDER_RECORD_ID=$(printf '%s' "$_created" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("result") or {}).get("id","") if d.get("success") else "")' 2>/dev/null || true)
+    [[ -n "$DNS_PLACEHOLDER_RECORD_ID" ]] || { error "Cloudflare 已返回创建结果但缺少 record id: ${domain}"; return 1; }
+    success "DNS 占位 A 记录已创建: ${domain} -> ${placeholder_ip}（Zone: ${_zone_domain}，灰云）"
+    return 0
+  fi
+  IFS=$'\t' read -r _rid _content _proxied <<<"$_parsed"
+  if [[ "$_content" == "$placeholder_ip" && "$_proxied" == "false" ]]; then
+    DNS_PLACEHOLDER_RECORD_ID="$_rid"
+    success "DNS 占位 A 记录已存在: ${domain} -> ${placeholder_ip}（灰云）"
+    return 0
+  fi
+  error "${domain} 已存在非脚本占位 A 记录（${_content}, proxied=${_proxied}）。为避免误改用户 DNS，请换新子域名或先手动清理该 A 记录"
+  return 1
+}
+
+delete_cloudflare_placeholder_a_record(){
+  local domain="$1" cf_token="$2" placeholder_ip="${3:-}" record_id="${4:-}"
+  [[ -z "$domain" || -z "$cf_token" || -z "$placeholder_ip" ]] && return 0
+  [[ -z "$record_id" ]] && return 0
+  local _zone_info _zone_id _records
+  _zone_info=$(cloudflare_find_zone "$domain" "$cf_token") || return 0
+  _zone_id="${_zone_info%%$'\t'*}"
+  _records=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+    -H "Authorization: Bearer ${cf_token}" \
+    "https://api.cloudflare.com/client/v4/zones/${_zone_id}/dns_records?type=A&name=${domain}&per_page=100" \
+    2>/dev/null) || return 0
+  while IFS=$'\t' read -r _rid _content _proxied; do
+    [[ -n "${_rid:-}" && "$_content" == "$placeholder_ip" && "$_proxied" == "false" ]] || continue
+    [[ -z "$record_id" || "$_rid" == "$record_id" ]] || continue
+    curl -fsSL --connect-timeout 5 --max-time 10 -X DELETE \
+      -H "Authorization: Bearer ${cf_token}" \
+      "https://api.cloudflare.com/client/v4/zones/${_zone_id}/dns_records/${_rid}" \
+      >/dev/null 2>&1 && info "已删除 DNS 占位 A 记录: ${domain} -> ${placeholder_ip}" || true
+  done < <(printf '%s' "$_records" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for r in d.get("result", []):
+    print("%s\t%s\t%s" % (r.get("id",""), r.get("content",""), str(r.get("proxied", False)).lower()))
+' 2>/dev/null || true)
 }
 
 show_help(){
@@ -1081,11 +1230,11 @@ PY
         warn "证书重载脚本缺失或版本过旧，重新生成..."
         _write_cert_reload_script
       fi
-      if [[ -f "${ACME_HOME}/acme.sh" ]]; then
+      if [[ -f "${ACME_HOME}/acme.sh" && -f "${ACME_HOME}/${domain}_ecc/${domain}.conf" ]]; then
         install_acme_cron_or_die
         return 0
       else
-        warn "证书仍有效但 acme.sh 缺失，将重新安装续期链并重新登记证书"
+        warn "证书仍有效但 acme.sh 或域名续期登记缺失，将重新走 DNS-01 登记"
       fi
     fi
     (( expiry_days <= 30 )) && info "证书即将到期（${expiry_days} 天），重新申请"
@@ -2026,6 +2175,25 @@ setup_firewall(){
   success "防火墙: chain ${FW_CHAIN}（SSH:${ssh_port} 蓝绿切换零裸奔）| ${count} 中转 IP | IPv6 guard: ${_ipv6_guard}"
 }
 
+landing_runtime_has_transit_rule(){
+  local tip="$1"
+  iptables -w 2 -C "$FW_CHAIN" -s "${tip}/32" -p tcp --dport "$LANDING_PORT" -j ACCEPT 2>/dev/null
+}
+
+landing_restore_has_transit_rule(){
+  local tip="$1" _fw_script="${MANAGER_BASE}/firewall-restore.sh"
+  [[ -f "$_fw_script" ]] || return 1
+  awk -v ip="-s ${tip}/32" -v port="--dport ${LANDING_PORT}" '
+    /xray-landing-transit/ && index($0, ip) && index($0, port) { found=1 }
+    END { exit found ? 0 : 1 }
+  ' "$_fw_script" 2>/dev/null
+}
+
+landing_firewall_has_transit_rule(){
+  local tip="$1"
+  landing_runtime_has_transit_rule "$tip" && landing_restore_has_transit_rule "$tip"
+}
+
 
 _persist_iptables(){
   local ssh_port="${1:-22}"
@@ -2231,6 +2399,8 @@ RSTO
 
 save_node_info(){
   local domain="$1" password="$2" transit_ip="$3" pub_ip="$4"
+  local dns_placeholder_ip="${6:-${DNS_PLACEHOLDER_IP:-}}"
+  local dns_record_id="${7:-${DNS_PLACEHOLDER_RECORD_ID:-}}"
   mkdir -p "${MANAGER_BASE}/nodes"
   local safe_domain; safe_domain=$(printf '%s' "$domain" | tr '.:/' '___')
   local safe_ip;     safe_ip=$(printf '%s' "$transit_ip" | tr '.:' '__')
@@ -2257,6 +2427,8 @@ DOMAIN=${domain}
 PASSWORD=${password}
 TRANSIT_IP=${transit_ip}
 PUBLIC_IP=${pub_ip}
+DNS_PLACEHOLDER_IP=${dns_placeholder_ip}
+DNS_PLACEHOLDER_RECORD_ID=${dns_record_id}
 CREATED=$(date +%Y%m%d_%H%M%S)
 NEOF
 }
@@ -2323,7 +2495,7 @@ add_node(){
   local _ip_exists
   _ip_exists=$(node_transit_ip_exists "${MANAGER_BASE}/nodes" "$NEW_TRANSIT") || true
   if [[ "${_ip_exists:-}" == "1" ]]; then
-    warn "中转 IP ${NEW_TRANSIT} 已在防火墙白名单，跳过重复添加 iptables 规则（但仍继续证书申请和 Token 生成）"
+    warn "中转 IP ${NEW_TRANSIT} 已存在，稍后将在写锁内核对防火墙运行态和持久化脚本"
     _fw_skip=1
   fi
 
@@ -2339,6 +2511,10 @@ add_node(){
         error "Token格式错误，请重新输入（40位以上，仅字母数字_-）"
       fi
     done
+  fi
+  if [[ -n "${DNS_PLACEHOLDER_IP:-}" ]]; then
+    validate_dns_placeholder_ipv4 "$DNS_PLACEHOLDER_IP" \
+      || die "DNS_PLACEHOLDER_IP 非法；它只用于 Cloudflare 灰云 A 记录，不会写入中转 token"
   fi
 
   # v2.32: 所有用户输入已收集，加锁后才开始写操作
@@ -2357,7 +2533,12 @@ add_node(){
   fi
   _locked_ip_exists=$(node_transit_ip_exists "${MANAGER_BASE}/nodes" "$NEW_TRANSIT") || true
   if [[ "${_locked_ip_exists:-}" == "1" ]]; then
-    _fw_skip=1
+    if landing_firewall_has_transit_rule "$NEW_TRANSIT"; then
+      _fw_skip=1
+    else
+      warn "中转 IP ${NEW_TRANSIT} 已有节点但防火墙运行态或持久化脚本缺失，强制重建防火墙"
+      _fw_skip=0
+    fi
   else
     _fw_skip=0
   fi
@@ -2375,6 +2556,7 @@ VLESS_GRPC_PORT=${VLESS_GRPC_PORT}
 VLESS_WS_PORT=${VLESS_WS_PORT}
 TROJAN_TCP_PORT=${TROJAN_TCP_PORT}
 CF_TOKEN=${CF_TOKEN}
+DNS_PLACEHOLDER_IP=${DNS_PLACEHOLDER_IP:-}
 CREATED_USER=${CREATED_USER}
 MARKER_VERSION=${VERSION}
 ACME_HOME=${ACME_HOME}
@@ -2430,6 +2612,7 @@ SMEOF
         "${ACME_HOME}/acme.sh" --home "${ACME_HOME}" --remove --domain "${NEW_DOMAIN}" --ecc 2>/dev/null || true
         rm -rf "${CERT_BASE:?}/${NEW_DOMAIN:?}" 2>/dev/null || true
       fi
+      delete_cloudflare_placeholder_a_record "$NEW_DOMAIN" "$USE_CF_TOKEN" "${DNS_PLACEHOLDER_IP:-}" "${DNS_PLACEHOLDER_RECORD_ID:-}"
     fi
     rm -rf "${_cert_snap_dir:-}" "${_acme_snap_dir:-}" 2>/dev/null || true
   }
@@ -2442,6 +2625,11 @@ SMEOF
     die "$_msg"
   }
   trap '_cancel_add_node_cert_issue "证书申请中断，新增节点已取消并恢复证书状态"' INT TERM
+  DNS_PLACEHOLDER_RECORD_ID=""
+  if [[ -n "${DNS_PLACEHOLDER_IP:-}" ]]; then
+    ensure_cloudflare_placeholder_a_record "$NEW_DOMAIN" "$USE_CF_TOKEN" "$DNS_PLACEHOLDER_IP" \
+      || _cancel_add_node_cert_issue "DNS 占位 A 记录处理失败，新增节点已取消"
+  fi
   if ! ( issue_certificate "$NEW_DOMAIN" "$USE_CF_TOKEN" ); then
     trap - INT TERM
     _restore_add_node_cert_state
@@ -2477,8 +2665,13 @@ SMEOF
   }
   trap '_cancel_add_node_before_trap "新增节点中断，已清理证书半状态"' INT TERM
 
-  local PUB_IP="${PUB_IP:-}"
-  [[ -n "$PUB_IP" ]] || PUB_IP=$(get_public_ip) || _cancel_add_node_before_trap "公网 IPv4 获取失败，新增节点已取消"
+  local PUB_IP=""
+  if [[ -n "${LANDING_AUTO_PUBLIC_IP:-}" ]]; then
+    PUB_IP="${LANDING_AUTO_PUBLIC_IP}"
+    validate_ipv4 "$PUB_IP" || _cancel_add_node_before_trap "LANDING_AUTO_PUBLIC_IP 不是合法公网 IPv4，新增节点已取消"
+  else
+    PUB_IP=$(get_public_ip) || _cancel_add_node_before_trap "公网 IPv4 获取失败，新增节点已取消"
+  fi
 
   # 提前计算最终节点文件路径（与 save_node_info 内部逻辑对齐）
   local _safe_dom; _safe_dom=$(printf '%s' "$NEW_DOMAIN" | tr '.:/' '___')
@@ -2493,6 +2686,8 @@ DOMAIN=${NEW_DOMAIN}
 PASSWORD=${NEW_PASS}
 TRANSIT_IP=${NEW_TRANSIT}
 PUBLIC_IP=${PUB_IP}
+DNS_PLACEHOLDER_IP=${DNS_PLACEHOLDER_IP:-}
+DNS_PLACEHOLDER_RECORD_ID=${DNS_PLACEHOLDER_RECORD_ID:-}
 CREATED=$(date +%Y%m%d_%H%M%S)
 NEOF_TMP
   chmod 600 "$_tmp_node" || _cancel_add_node_before_trap "临时节点权限设置失败，新增节点已取消"
@@ -2600,14 +2795,25 @@ delete_node(){
   (( n == 0 )) && { warn "无可删除的节点"; return; }
   (( n == 1 )) && die "仅剩最后一个节点！请使用「清除本系统所有数据」"
 
-  read -rp "请输入节点编号: " DEL_INPUT
-  [[ "$DEL_INPUT" =~ ^[0-9]+$ ]] || die "请输入数字"
-  local idx=$(( DEL_INPUT - 1 ))
-  (( idx >= 0 && idx < n )) || die "编号越界（共 ${n} 个）"
+  local DEL_INPUT idx
+  while true; do
+    read -rp "请输入节点编号（q 返回）: " DEL_INPUT
+    DEL_INPUT=$(trim "$DEL_INPUT")
+    [[ "$DEL_INPUT" =~ ^[Qq]$ || -z "$DEL_INPUT" ]] && { info "已取消"; return; }
+    if ! [[ "$DEL_INPUT" =~ ^[0-9]+$ ]]; then
+      error "请输入数字编号；输入 q 返回菜单"
+      continue
+    fi
+    idx=$(( DEL_INPUT - 1 ))
+    (( idx >= 0 && idx < n )) || { error "编号越界（共 ${n} 个），请重新输入"; continue; }
+    break
+  done
 
   local DEL_CONF="${node_files[$idx]}"
   local DEL_DOMAIN; DEL_DOMAIN=$(grep '^DOMAIN='     "$DEL_CONF" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}')
   local DEL_TRANSIT; DEL_TRANSIT=$(grep '^TRANSIT_IP=' "$DEL_CONF" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}')
+  local DEL_DNS_PLACEHOLDER_IP; DEL_DNS_PLACEHOLDER_IP=$(grep '^DNS_PLACEHOLDER_IP=' "$DEL_CONF" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
+  local DEL_DNS_RECORD_ID; DEL_DNS_RECORD_ID=$(grep '^DNS_PLACEHOLDER_RECORD_ID=' "$DEL_CONF" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
 
   read -rp "确认删除 ${DEL_DOMAIN}（中转: ${DEL_TRANSIT}）？[y/N]: " CONFIRM
   [[ "$CONFIRM" =~ ^[Yy]$ ]] || { info "已取消"; return; }
@@ -2685,6 +2891,12 @@ delete_node(){
     # [Doc7-🔴] 回滚后必须恢复服务运行态，否则剩余所有节点永久断流直到人工介入
     systemctl reset-failed "$LANDING_SVC" 2>/dev/null || true
     systemctl restart "$LANDING_SVC" 2>/dev/null || true
+    if ! systemctl is-active --quiet "$LANDING_SVC"; then
+      __delete_node_trap_active=0
+      trap - INT TERM ERR
+      _release_lock
+      die "删除已回滚，但服务仍无法恢复，请立即检查: journalctl -u ${LANDING_SVC}"
+    fi
     __delete_node_trap_active=0
     trap - INT TERM ERR
     _release_lock; warn "节点已恢复，请检查: journalctl -u ${LANDING_SVC}"
@@ -2704,6 +2916,7 @@ delete_node(){
         rm -rf "${ACME_HOME}/${DEL_DOMAIN}_ecc" 2>/dev/null || true
       fi
       rm -rf "${CERT_BASE:?}/${DEL_DOMAIN:?}" 2>/dev/null || true
+      delete_cloudflare_placeholder_a_record "$DEL_DOMAIN" "$CF_TOKEN" "$DEL_DNS_PLACEHOLDER_IP" "$DEL_DNS_RECORD_ID"
     fi
     __delete_node_trap_active=0
     trap - INT TERM ERR
@@ -2963,16 +3176,24 @@ show_status(){
     else
       echo -e "  恢复脚本版本:    ${GREEN}✓ ${_fw_ver_line#*=}${NC}"
     fi
-    local _fw_ips _live_ips
-    _fw_ips=$(grep 'xray-landing-transit' "$_fw_script" 2>/dev/null \
-      | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//' || echo "")
-    _live_ips=$(iptables -w 2 -L "$FW_CHAIN" -n 2>/dev/null \
-      | awk '/xray-landing-transit/ && /ACCEPT/{print $4}' \
-      | sed 's|/32||' | sort -u | tr '\n' ' ' | sed 's/ $//' || echo "")
-    if [[ "$_fw_ips" == "$_live_ips" ]]; then
-      echo -e "  恢复脚本一致性:  ${GREEN}✓ transit IP 与运行链匹配${NC}"
+    local _fw_bad=0 _fw_checked=0 _tip
+    while IFS= read -r _tip; do
+      [[ -n "$_tip" ]] || continue
+      (( ++_fw_checked )) || true
+      if ! landing_runtime_has_transit_rule "$_tip"; then
+        echo -e "  ${RED}运行链白名单:    ✗ ${_tip}/32:${LANDING_PORT} 缺失或端口漂移${NC}"
+        _fw_bad=1
+      fi
+      if ! landing_restore_has_transit_rule "$_tip"; then
+        echo -e "  ${RED}恢复脚本白名单:  ✗ ${_tip}/32:${LANDING_PORT} 缺失或端口漂移${NC}"
+        _fw_bad=1
+      fi
+    done < <(find "${MANAGER_BASE}/nodes" -name "*.conf" -not -name ".tmp-node-*.conf" -type f 2>/dev/null \
+      -exec awk -F= '$1=="TRANSIT_IP"{print $2}' {} + | sort -u)
+    if (( _fw_bad == 0 )); then
+      echo -e "  恢复脚本一致性:  ${GREEN}✓ ${_fw_checked} 个中转 IP 均匹配端口 ${LANDING_PORT}${NC}"
     else
-      echo -e "  ${RED}恢复脚本一致性:  ✗ 与运行链不一致（重启后规则可能漂移）${NC}"; _ok=0
+      echo -e "  ${RED}恢复脚本一致性:  ✗ 运行链或恢复脚本与节点端口不一致${NC}"; _ok=0
       # v2.42 GPT #5: --status 是只读巡检，不执行写操作；修复用独立命令
       echo -e "  ${CYAN}  修复: bash $0 set-port ${LANDING_PORT}（触发 setup_firewall 重建）${NC}"
     fi
@@ -3039,11 +3260,8 @@ print_pairing_info(){
   load_manager_config
 
   local token=""
-  # BUG-40 FIX: Token ip 字段必须是落地机公网 IPv4，dom 必须是域名
-  # 用 python3 ipaddress 模块验证 pub_ip 确实是合法 IPv4，防止位移错误静默通过
-  if ! printf '%s' "$pub_ip" | python3 -c "import ipaddress,sys; ipaddress.IPv4Address(sys.stdin.read().strip())" 2>/dev/null; then
-    die "pub_ip='${pub_ip}' 不是合法 IPv4，拒绝生成 Token"
-  fi
+  # Token ip 字段必须是落地机真实公网 IPv4；DNS 占位 IP 只能留在 Cloudflare A 记录。
+  validate_ipv4 "$pub_ip" || die "pub_ip='${pub_ip}' 不是合法公网 IPv4，拒绝生成 Token"
   local -r validated_ip="$pub_ip"
   token=$(printf '%s\n%s\n%s\n%s\n%s' "$validated_ip" "$domain" "$LANDING_PORT" "$VLESS_UUID" "$password" | python3 -c "
 import json, base64, sys
@@ -3212,6 +3430,21 @@ purge_all(){
     done
     # --uninstall-cronjob already executed at start of purge_all [F6]
   fi
+  if [[ -n "${CF_TOKEN:-}" ]]; then
+    local _dns_seen=()
+    while IFS= read -r meta; do
+      local _ddom _dpi _drid _pair _old _seen=0
+      _ddom=$(grep '^DOMAIN=' "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
+      _dpi=$(grep '^DNS_PLACEHOLDER_IP=' "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
+      _drid=$(grep '^DNS_PLACEHOLDER_RECORD_ID=' "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
+      [[ -n "$_ddom" && -n "$_dpi" ]] || continue
+      _pair="${_ddom}|${_dpi}|${_drid}"
+      for _old in "${_dns_seen[@]+${_dns_seen[@]}}"; do [[ "$_old" == "$_pair" ]] && _seen=1 && break; done
+      (( _seen )) && continue
+      _dns_seen+=("$_pair")
+      delete_cloudflare_placeholder_a_record "$_ddom" "$CF_TOKEN" "$_dpi" "$_drid"
+    done < <(find "${MANAGER_BASE}/nodes" -name "*.conf" -not -name ".tmp-node-*.conf" -type f 2>/dev/null)
+  fi
   # [Doc7-🟠] 移除原有 grep -v '^MAILTO=""' 操作，该操作会破坏宿主机其他业务的 cron 全局变量
   # acme.sh --uninstall-cronjob 已在上方执行，会精确移除自己的条目，无需额外干预 crontab
 
@@ -3322,7 +3555,7 @@ purge_all(){
   sed -i '/# xray-landing: keep cron\/PAM sessions aligned/,/^root hard nofile/d' /etc/security/limits.conf 2>/dev/null || true
   rm -rf "$LANDING_LOG" 2>/dev/null || true
   rm -f /var/log/acme-xray-landing-renew.log /var/run/xray-landing.update.warn 2>/dev/null || true
-  rm -f "$LANDING_BIN" "$CERT_RELOAD_SCRIPT" 2>/dev/null || true
+  rm -f "$LANDING_BIN" "$CERT_RELOAD_SCRIPT" "$LOGROTATE_FILE" 2>/dev/null || true
   rm -rf /usr/local/share/xray-landing 2>/dev/null || true
   rm -rf "$LANDING_BASE" 2>/dev/null || true
 
@@ -3330,6 +3563,7 @@ purge_all(){
   local _pclean=1
   [[ -f "$LANDING_BIN" ]] && { warn "二进制 ${LANDING_BIN} 残留"; _pclean=0; } || true
   [[ -f "$CERT_RELOAD_SCRIPT" ]] && { warn "证书重载脚本 ${CERT_RELOAD_SCRIPT} 残留"; _pclean=0; } || true
+  [[ -f "$LOGROTATE_FILE" ]] && { warn "logrotate ${LOGROTATE_FILE} 残留"; _pclean=0; } || true
   [[ -d /usr/local/share/xray-landing ]] && { warn "资产目录 /usr/local/share/xray-landing 残留"; _pclean=0; } || true
   systemctl is-active --quiet "$LANDING_SVC" 2>/dev/null     && { warn "服务 ${LANDING_SVC} 仍在运行"; _pclean=0; } || true
   systemctl is-enabled --quiet "$LANDING_SVC" 2>/dev/null     && { warn "服务 ${LANDING_SVC} 仍为 enabled"; _pclean=0; } || true
@@ -3416,6 +3650,7 @@ fresh_install(){
     _headless=1
     DOMAIN="${LANDING_AUTO_DOMAIN:-${DOMAIN:-}}"
     CF_TOKEN="${LANDING_AUTO_CF_TOKEN:-${CF_TOKEN:-}}"
+    DNS_PLACEHOLDER_IP="${LANDING_AUTO_DNS_PLACEHOLDER_IP:-${DNS_PLACEHOLDER_IP:-${FAKE_IP:-}}}"
 
     PASS="${LANDING_AUTO_PASSWORD:-${PASS:-}}"
     TRANSIT_IP="${LANDING_AUTO_TRANSIT_IP:-${TRANSIT_IP:-}}"
@@ -3442,14 +3677,14 @@ fresh_install(){
         validate_port "$_auto_ep" || die "无头模式 EXTRA_PORTS 含非法端口: $_auto_ep"
       done < <(extra_ports_lines "$EXTRA_PORTS")
     fi
-    if [[ -n "${FAKE_IP:-}" ]]; then
-      die "FAKE_IP 只允许用于 DNS-01 的外部 DNS 记录，不能写入中转导入 Token；请改用真实落地公网 IPv4: LANDING_AUTO_PUBLIC_IP"
+    if [[ -n "${DNS_PLACEHOLDER_IP:-}" ]]; then
+      validate_dns_placeholder_ipv4 "$DNS_PLACEHOLDER_IP"
+      [[ -n "${FAKE_IP:-}" ]] && warn "FAKE_IP 仅作为 DNS_PLACEHOLDER_IP 兼容别名，不会写入中转导入 Token"
     fi
     if [[ -n "${LANDING_AUTO_PUBLIC_IP:-}" ]]; then
-      PUB_IP="${LANDING_AUTO_PUBLIC_IP}"
-      validate_ipv4 "$PUB_IP"
+      validate_ipv4 "$LANDING_AUTO_PUBLIC_IP"
     else
-	      PUB_IP=""
+      unset PUB_IP
     fi
     info "检测到无头静默安装模式，已跳过交互输入"
   else
@@ -3471,6 +3706,25 @@ fresh_install(){
       else
         error "Token格式错误，请重新输入（40位以上，仅字母数字_-）"
       fi
+    done
+
+    while true; do
+      read -rp "是否自动创建/更新 CF 灰云 A 占位记录（不指向落地真实 IP）？[Y/n]: " _dns_placeholder_confirm
+      _dns_placeholder_confirm="${_dns_placeholder_confirm:-Y}"
+      if [[ "$_dns_placeholder_confirm" =~ ^[Nn]$ ]]; then
+        DNS_PLACEHOLDER_IP=""
+        break
+      fi
+      if [[ "$_dns_placeholder_confirm" =~ ^[Yy]$ ]]; then
+        read -rp "DNS 占位 IP（默认 203.0.113.10，只用于 A 记录）[203.0.113.10]: " DNS_PLACEHOLDER_IP
+        DNS_PLACEHOLDER_IP="${DNS_PLACEHOLDER_IP:-203.0.113.10}"
+        if validate_dns_placeholder_ipv4 "$DNS_PLACEHOLDER_IP" 2>/dev/null; then
+          break
+        fi
+        error "DNS 占位 IP 格式错误，请重新输入；该 IP 不会写入中转 token"
+        continue
+      fi
+      error "请输入 y 或 n"
     done
     
     while true; do
@@ -3558,6 +3812,85 @@ fresh_install(){
   fi
   [[ "$CONFIRM" =~ ^[Yy]$ ]] || { info "已取消"; exit 0; }
 
+  __LANDING_FRESH_INSTALL_TRAP_ACTIVE=0
+  _fresh_install_rollback(){
+    [[ "${__LANDING_FRESH_INSTALL_TRAP_ACTIVE:-0}" == "1" ]] || return 0
+    warn "[rollback] 安装中断，清理半成品..."
+    systemctl stop    "$LANDING_SVC"   2>/dev/null || true
+    systemctl disable "$LANDING_SVC"   2>/dev/null || true
+    rm -f "/etc/systemd/system/${LANDING_SVC}" \
+          "/etc/systemd/system/xray-landing-recovery.service" 2>/dev/null || true
+    systemctl disable --now xray-landing-iptables-restore.service 2>/dev/null || true
+    rm -f "/etc/systemd/system/xray-landing-iptables-restore.service" \
+          "${MANAGER_BASE}/firewall-restore.sh" 2>/dev/null || true
+    rm -f "/etc/nginx/conf.d/xray-landing-fallback.conf" 2>/dev/null || true
+    rm -f "/etc/systemd/system/nginx.service.d/landing-override.conf" 2>/dev/null || true
+    if [[ -f "$NGINX_CONF_ORIG" ]]; then
+      cp -a "$NGINX_CONF_ORIG" /etc/nginx/nginx.conf 2>/dev/null || warn "[rollback] nginx.conf 恢复失败，请手动检查"
+      rm -f "$NGINX_CONF_ORIG" 2>/dev/null || true
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    if [[ "${NGINX_INSTALLED_BY_SCRIPT:-0}" == "1" || -f "$NGINX_INSTALLED_FLAG" ]]; then
+      systemctl stop nginx 2>/dev/null || true
+      systemctl disable nginx 2>/dev/null || true
+    elif systemctl is-active --quiet nginx 2>/dev/null; then
+      nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || warn "[rollback] nginx reload 失败，请手动检查"
+      restore_packaged_nginx_default_site
+    else
+      restore_packaged_nginx_default_site
+    fi
+    systemctl reset-failed nginx 2>/dev/null || true
+    rm -f "$NGINX_INSTALLED_FLAG" "$NGINX_DEFAULT_SITE_DISABLED_FLAG" 2>/dev/null || true
+    local _lines _n _chain
+    mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$FW_CHAIN" '$2==c {print $1}' | sort -rn)
+    for _n in "${_lines[@]}"; do iptables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
+    for _chain in "$FW_CHAIN" "${FW_CHAIN}-NEW" "${FW_CHAIN}-OLD"; do
+      mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$_chain" '$2==c {print $1}' | sort -rn)
+      for _n in "${_lines[@]}"; do iptables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
+      iptables -w 2 -F "$_chain" 2>/dev/null || true
+      iptables -w 2 -X "$_chain" 2>/dev/null || true
+    done
+    if command -v ip6tables >/dev/null 2>&1; then
+      for _chain in "$FW_CHAIN6" "${FW_CHAIN6}-NEW" "${FW_CHAIN6}-OLD"; do
+        mapfile -t _lines < <(ip6tables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$_chain" '$2==c {print $1}' | sort -rn)
+        for _n in "${_lines[@]}"; do ip6tables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
+        ip6tables -w 2 -F "$_chain" 2>/dev/null || true
+        ip6tables -w 2 -X "$_chain" 2>/dev/null || true
+      done
+    fi
+    rm -f "$LANDING_BIN" "$CERT_RELOAD_SCRIPT" "$LOGROTATE_FILE" 2>/dev/null || true
+    rm -rf /usr/local/share/xray-landing 2>/dev/null || true
+    rm -f /run/lock/xray-landing-recovery.last 2>/dev/null || true
+    if [[ -f "${ACME_HOME}/acme.sh" ]]; then
+      env ACME_HOME="${ACME_HOME}" "${ACME_HOME}/acme.sh" --uninstall-cronjob 2>/dev/null || true
+    fi
+    rm -f /etc/cron.d/xray-landing-acme /etc/cron.d/acme-xray-landing 2>/dev/null || true
+    if [[ -n "${DOMAIN:-}" && -f "${ACME_HOME}/acme.sh" ]]; then
+      env ACME_HOME="${ACME_HOME}" "${ACME_HOME}/acme.sh" \
+        --home "${ACME_HOME}" --remove --domain "${DOMAIN}" --ecc 2>/dev/null || true
+    fi
+    delete_cloudflare_placeholder_a_record "${DOMAIN:-}" "${CF_TOKEN:-}" "${DNS_PLACEHOLDER_IP:-}" "${DNS_PLACEHOLDER_RECORD_ID:-}"
+    rm -rf "$CERT_BASE" "$LANDING_BASE" 2>/dev/null || true
+    rm -f "$INSTALLED_FLAG" "$MANAGER_CONFIG" 2>/dev/null || true
+    rm -f "${_staged_fi_mgr:-}" 2>/dev/null || true
+    rm -rf "${MANAGER_BASE}/nodes" 2>/dev/null || true
+    (( _fresh_lock_acquired )) && _release_lock
+    warn "[rollback] 完成，可安全重新运行安装"
+  }
+  _acquire_lock
+  _fresh_lock_acquired=1
+  if [[ -f "$INSTALLED_FLAG" ]]; then
+    _release_lock; _fresh_lock_acquired=0
+    die "检测到已完成安装，拒绝继续全新安装；请进入管理菜单新增节点"
+  fi
+  ss -tlnp 2>/dev/null | grep -qE ":${LANDING_PORT}\b" && {
+    _release_lock; _fresh_lock_acquired=0
+    die "端口 ${LANDING_PORT} 已被占用，请重新运行安装"
+  }
+  __LANDING_FRESH_INSTALL_TRAP_ACTIVE=1
+  trap '_fresh_install_rollback' ERR
+  trap '_fresh_install_rollback; exit 130' INT TERM
+
   check_deps
 
   ss -tlnp 2>/dev/null | grep -qE ":${LANDING_PORT}\b" && die "端口 ${LANDING_PORT} 已被占用（请先检查 nginx / xray* / mack-a*）"
@@ -3591,93 +3924,9 @@ fresh_install(){
     ss -tlnp 2>/dev/null | grep -q ":443 " && die "443 端口已被占用！检测到 mack-a 已安装，请先执行: systemctl stop xray nginx v2ray 后再安装"
     warn "检测到 mack-a 已安装，本落地机将与其共享端口，请确认无冲突"
   fi
-  _acquire_lock
-  _fresh_lock_acquired=1
-  if [[ -f "$INSTALLED_FLAG" ]]; then
-    _release_lock; _fresh_lock_acquired=0
-    die "检测到已完成安装，拒绝继续全新安装；请进入管理菜单新增节点"
-  fi
-  ss -tlnp 2>/dev/null | grep -qE ":${LANDING_PORT}\b" && {
-    _release_lock; _fresh_lock_acquired=0
-    die "端口 ${LANDING_PORT} 已被占用，请重新运行安装"
-  }
-  __LANDING_FRESH_INSTALL_TRAP_ACTIVE=0
-  
-  # [BUG-6 FIX] Define rollback function BEFORE setting trap
-  _fresh_install_rollback(){
-    [[ "${__LANDING_FRESH_INSTALL_TRAP_ACTIVE:-0}" == "1" ]] || return 0
-    warn "[rollback] 安装中断，清理半成品..."
-    systemctl stop    "$LANDING_SVC"   2>/dev/null || true
-    systemctl disable "$LANDING_SVC"   2>/dev/null || true
-    rm -f "/etc/systemd/system/${LANDING_SVC}" \
-          "/etc/systemd/system/xray-landing-recovery.service" 2>/dev/null || true
-    systemctl disable --now xray-landing-iptables-restore.service 2>/dev/null || true
-    rm -f "/etc/systemd/system/xray-landing-iptables-restore.service" \
-          "${MANAGER_BASE}/firewall-restore.sh" 2>/dev/null || true
-    # [F4] Also clean nginx fallback artifacts — without this, next run finds Nginx already
-    # configured and enters inconsistent state thinking setup_fallback_decoy already ran.
-    rm -f "/etc/nginx/conf.d/xray-landing-fallback.conf" 2>/dev/null || true
-    rm -f "/etc/systemd/system/nginx.service.d/landing-override.conf" 2>/dev/null || true
-    if [[ -f "$NGINX_CONF_ORIG" ]]; then
-      cp -a "$NGINX_CONF_ORIG" /etc/nginx/nginx.conf 2>/dev/null || warn "[rollback] nginx.conf 恢复失败，请手动检查"
-      rm -f "$NGINX_CONF_ORIG" 2>/dev/null || true
-    fi
-    systemctl daemon-reload 2>/dev/null || true
-    if [[ "${NGINX_INSTALLED_BY_SCRIPT:-0}" == "1" || -f "$NGINX_INSTALLED_FLAG" ]]; then
-      systemctl stop nginx 2>/dev/null || true
-      systemctl disable nginx 2>/dev/null || true
-    elif systemctl is-active --quiet nginx 2>/dev/null; then
-      nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || warn "[rollback] nginx reload 失败，请手动检查"
-      restore_packaged_nginx_default_site
-    else
-      restore_packaged_nginx_default_site
-    fi
-    systemctl reset-failed nginx 2>/dev/null || true
-    rm -f "$NGINX_INSTALLED_FLAG" "$NGINX_DEFAULT_SITE_DISABLED_FLAG" 2>/dev/null || true
-    local _lines _n
-    mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$FW_CHAIN" '$2==c {print $1}' | sort -rn)
-    for _n in "${_lines[@]}"; do iptables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
-    for _chain in "$FW_CHAIN" "${FW_CHAIN}-NEW" "${FW_CHAIN}-OLD"; do
-      mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$_chain" '$2==c {print $1}' | sort -rn)
-      for _n in "${_lines[@]}"; do iptables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
-      iptables -w 2 -F "$_chain" 2>/dev/null || true
-      iptables -w 2 -X "$_chain" 2>/dev/null || true
-    done
-    if command -v ip6tables >/dev/null 2>&1; then
-      for _chain in "$FW_CHAIN6" "${FW_CHAIN6}-NEW" "${FW_CHAIN6}-OLD"; do
-        mapfile -t _lines < <(ip6tables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$_chain" '$2==c {print $1}' | sort -rn)
-        for _n in "${_lines[@]}"; do ip6tables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
-        ip6tables -w 2 -F "$_chain" 2>/dev/null || true
-        ip6tables -w 2 -X "$_chain" 2>/dev/null || true
-      done
-    fi
-    # [F3] Clean installed binary and assets — install_xray_binary() runs before this trap
-    # fires; leaving the binary creates a contaminated host state on the next run.
-    rm -f "$LANDING_BIN" "$CERT_RELOAD_SCRIPT" "$LOGROTATE_FILE" 2>/dev/null || true
-    rm -rf /usr/local/share/xray-landing 2>/dev/null || true
-    # Also clear recovery lockfile so a future fresh install doesn't trip the 1800s cooldown
-    rm -f /run/lock/xray-landing-recovery.last 2>/dev/null || true
-    # [C2 Fix] Uninstall acme.sh cronjob during rollback to prevent orphaned cron entries
-    if [[ -f "${ACME_HOME}/acme.sh" ]]; then
-      env ACME_HOME="${ACME_HOME}" "${ACME_HOME}/acme.sh" --uninstall-cronjob 2>/dev/null || true
-    fi
-    rm -f /etc/cron.d/xray-landing-acme /etc/cron.d/acme-xray-landing 2>/dev/null || true
-    # [v2.11 Doc10-C-🔴] Remove acme.sh domain registration before wiping cert dirs.
-    # Without this, acme.sh cron keeps firing reloadcmd for a domain that no longer has
-    # a service — causing spurious reload failures and cron log noise indefinitely.
-    if [[ -n "${DOMAIN:-}" && -f "${ACME_HOME}/acme.sh" ]]; then
-      env ACME_HOME="${ACME_HOME}" "${ACME_HOME}/acme.sh" \
-        --home "${ACME_HOME}" --remove --domain "${DOMAIN}" --ecc 2>/dev/null || true
-    fi
-    # [F4] Remove cert and config dirs so next run starts clean
-    rm -rf "$CERT_BASE" "$LANDING_BASE" 2>/dev/null || true
-    rm -f "$INSTALLED_FLAG" "$MANAGER_CONFIG" 2>/dev/null || true
-    rm -f "${_staged_fi_mgr:-}" 2>/dev/null || true   # [v2.8] purge staged manager.conf on rollback
-    rm -rf "${MANAGER_BASE}/nodes" 2>/dev/null || true
-    (( _fresh_lock_acquired )) && _release_lock
-    warn "[rollback] 完成，可安全重新运行安装"
-  }
-  
+  # Fresh rollback trap is registered after the duplicate-install guard but before
+  # check_deps, so dependency-stage failures clean only this fresh install's half-state.
+
 	  # 若存在旧 manager.conf，先决定是否复用旧端口，再执行安装二进制/公网探测等副作用。
 	  if [[ -f "$MANAGER_CONFIG" ]]; then
 	    local _exist_uuid; _exist_uuid=$(grep '^VLESS_UUID='       "$MANAGER_CONFIG" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}') || true
@@ -3757,8 +4006,13 @@ fresh_install(){
 		  trap '_fresh_install_rollback; exit 130' INT TERM
 		  optimize_kernel_network; create_system_user; install_xray_binary
 
-	  local PUB_IP="${PUB_IP:-}"
-	  [[ -n "$PUB_IP" ]] || PUB_IP=$(get_public_ip)
+	  local PUB_IP=""
+	  if [[ -n "${LANDING_AUTO_PUBLIC_IP:-}" ]]; then
+	    PUB_IP="${LANDING_AUTO_PUBLIC_IP}"
+	    validate_ipv4 "$PUB_IP"
+	  else
+	    PUB_IP=$(get_public_ip)
+	  fi
 
 	  mkdir -p "$LANDING_BASE"
 
@@ -3778,6 +4032,7 @@ VLESS_GRPC_PORT=${VLESS_GRPC_PORT}
 VLESS_WS_PORT=${VLESS_WS_PORT}
 TROJAN_TCP_PORT=${TROJAN_TCP_PORT}
 CF_TOKEN=${CF_TOKEN}
+DNS_PLACEHOLDER_IP=${DNS_PLACEHOLDER_IP:-}
 CREATED_USER=${CREATED_USER}
 MARKER_VERSION=${VERSION}
 ACME_HOME=${ACME_HOME}
@@ -3789,6 +4044,10 @@ MARKER_CREATED=$(date +%Y%m%d_%H%M%S)
 SMFI
 
   setup_fallback_decoy
+  DNS_PLACEHOLDER_RECORD_ID=""
+  if [[ -n "${DNS_PLACEHOLDER_IP:-}" ]]; then
+    ensure_cloudflare_placeholder_a_record "$DOMAIN" "$CF_TOKEN" "$DNS_PLACEHOLDER_IP"
+  fi
   issue_certificate "$DOMAIN" "$CF_TOKEN"
 
   # 临时节点通过 _TMP_NODE_PATH 参与本轮 sync/firewall，成功后再提交正式 nodes/*.conf。
@@ -3797,7 +4056,7 @@ SMFI
   local _final_node="${MANAGER_BASE}/nodes/${_safe_dom}_${_safe_ip}.conf"
   local _tmp_node="${MANAGER_BASE}/nodes/.tmp-node-${_safe_dom}_${_safe_ip}.conf"
 
-  save_node_info "$DOMAIN" "$PASS" "$TRANSIT_IP" "$PUB_IP" "$_tmp_node"
+  save_node_info "$DOMAIN" "$PASS" "$TRANSIT_IP" "$PUB_IP" "$_tmp_node" "${DNS_PLACEHOLDER_IP:-}" "${DNS_PLACEHOLDER_RECORD_ID:-}"
   ( export _TMP_NODE_PATH="$_tmp_node" _STAGED_MANAGER_CONFIG="$_staged_fi_mgr"; sync_xray_config )
 
   setup_health_check      # [S1-HIGH] 配置健康检查
