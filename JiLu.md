@@ -624,3 +624,131 @@
   - 已做静态验证和最小函数复现，未做 Debian 12 中转机实机长时间运行、真实 Nginx reload 半失败故障注入、并发管理窗口实测。
 - Commit:
   - 本次三轮合并提交：`fix: harden transit route recovery v6.05`
+
+## 2026-05-22 第 16 轮 - v6.06
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：继续追用户实机反馈的中转记录文件数小时后被识别为 `.meta/.map` 缺失或不一致，修复 v6.05 仍存在的事务和自愈边界。
+- 接受意见：
+  - WSL Codex P1：`import_token()` 用 `_atomic_apply_route ... || die` 调用路由事务，会让 Bash 在函数体内抑制 `errexit/ERR trap`；`.map/.meta` 写入、chmod、mv 等裸失败点可能继续执行并留下半状态。
+  - WSL Codex P1：`_global_cleanup()` 每次 EXIT 广扫 `/etc/nginx` 和管理目录下的 `.snap-recover.*`，只读 `--status` 或另一个脚本实例退出时可能误删正在导入/修复/删除事务使用的回滚快照。
+  - WSL Codex P1：`.installed` 存在且 `.meta` 仍在、但 stream include 丢失时，旧逻辑先清安装标记进入 fresh install，使后续 include 自愈分支基本不可达。
+  - WSL Codex P2：删除中转路由时，`remove_landing_snippet()` 删除 `.map/.meta` 的失败没有纳入已准备好的回滚，可能留下 `.meta/.map` 分裂。
+- 拒绝意见：
+  - WSL Claude：未发现 P0-P2，建议提交当前版本。主笔拒绝“无需改动”的结论；Codex 给出的 `errexit` 抑制与 EXIT 清理误删活跃快照均有 Bash 语义复现和明确代码位置。
+  - 不接受重新自动删除孤儿 `.meta` 或孤儿 `.map`：`.meta` 仍是订阅真相源，自动删除会扩大用户反馈的记录文件丢失风险。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转 `_atomic_apply_route()` 对 `.map/.meta` 临时文件写入、权限设置和原子提交改为显式失败处理，失败立即回滚并退出；`import_token()` 不再把路由事务放在 `||` 左侧调用。
+  - 中转和落地 `_global_cleanup()` 不再在 EXIT 时删除 `.snap-recover.*` 事务快照，只清 atomic_write/暂存残留；超过 1 天的陈旧 `.snap-recover.*` 仍由脚本入口 stale sweep 清理。
+  - 中转已安装入口改为：只要 `.meta` 真相源仍存在，即使 stream include 丢失也先进入自愈分支尝试 `init_nginx_stream`，不直接清标记重装。
+  - 中转删除路由时把 `remove_landing_snippet()` 删除失败纳入同一回滚分支，避免 `.map` 已删而 `.meta` 删除失败后跳过恢复。
+  - 两脚本版本统一提升到 `v6.06`；落地脚本除清理边界外不改业务逻辑。
+  - README 和两份指南同步当前 v6.06 事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - Bash 最小复现：函数位于 `||` 左侧时，函数体内 `set -eE` 和 `ERR trap` 会被抑制；改动后路由事务不再处于该调用上下文。
+  - WSL Codex/GPT-5.5 新会话审查：发现并接受上述 P1/P2。
+  - WSL Claude Code/Claude 4.7 新会话审查：未发现 P0-P2；其结论已裁决。
+- 残留风险：
+  - 已做静态验证和 Bash 语义复现，未做 Debian 12 中转机实机长时间运行、并发管理窗口故障注入、真实 Nginx reload 失败注入或删除路由不可删除文件注入。
+- Commit:
+  - 随第 18 轮真实优化合并提交：`fix: harden transit route recovery v6.08`
+
+## 2026-05-22 第 17 轮 - v6.07
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：复审 v6.06 未提交补丁，继续补齐中转记录文件自愈和删除路由事务中断边界。
+- 接受意见：
+  - WSL Codex P1：`.installed` 缺失且 stream include 也缺失、但 `.meta` 仍存在时，v6.06 无标记分支仍会跳过自愈并进入 `fresh_install()`，可能覆盖或阻塞已有记录。
+  - WSL Codex P1：删除中转路由在快照完成后没有本地 `INT/TERM/ERR` trap；如果 `.map/.meta` 删除后、`nginx_reload` 前被中断，磁盘态和运行态会分裂。
+- 改写后接受：
+  - 无标记自愈未只在 include 存在时修 `.map`，而是只要 `.meta` 真相源存在就先持锁执行 `.map` 修复、stream include 修复和 Nginx reload；失败则拒绝 fresh install。
+  - 删除路由中断回滚补为本地事务 trap，恢复 `.map/.meta` 快照后尝试 reload/restart Nginx 并释放锁；正常提交后解除 trap。
+- 拒绝意见：
+  - WSL Claude：未发现 P0-P2，建议提交当前 v6.06。主笔拒绝“无需改动”的结论；Codex 两个 P1 均能由具体文件状态和中断窗口复现。
+  - WSL Claude P3：`.upstream` 未备份。拒绝作为本轮改动；当前脚本未创建或使用 `.upstream`，保留删除兼容项即可，不为废弃文件扩大事务面。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转无 `.installed` 分支改为先检测 `.meta`；只要 `.meta` 存在，即使 stream include 缺失也先尝试 `_repair_maps_from_meta()`、`init_nginx_stream()` 和 `nginx_reload()`，成功后恢复安装标记，失败则拒绝进入全新安装。
+  - 中转 `delete_landing_route()` 在快照 `.map/.meta` 后注册本地删除事务 trap；删除后到 reload 前被中断时会恢复快照、尝试恢复 Nginx 运行态并释放锁。
+  - 两脚本版本统一提升到 `v6.07`；落地脚本仅同步版本号，落地业务逻辑不变。
+  - README 和两份指南同步当前 v6.07 事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - WSL Codex/GPT-5.5 新会话审查：发现并接受上述两个 P1。
+  - WSL Claude Code/Claude 4.7 新会话审查：未发现 P0-P2；其结论已裁决。
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 中转机实机长时间运行、无标记/include 缺失故障注入、删除路由 Ctrl-C 注入或真实 Nginx reload 失败注入。
+- Commit:
+  - 随第 18 轮真实优化合并提交：`fix: harden transit route recovery v6.08`
+
+## 2026-05-22 第 18 轮 - v6.08
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：复审 v6.07 未提交补丁，确认是否达到第 16-18 轮合并提交条件，并修复 stream include marker-only 漂移。
+- 接受意见：
+  - WSL Codex P1：`init_nginx_stream()`、状态检查和启动自愈只看 `STREAM_INCLUDE_MARKER` 注释，若 marker 仍在但真实 `include /etc/nginx/stream-transit.conf;` 行丢失，脚本可能误判 stream include 已恢复，Nginx 实际未加载中转 stream 配置。
+- 改写后接受：
+  - 新增 `_main_stream_include_valid()`，要求 marker 和真实 include 行同时存在；状态检查、无标记自愈、已安装自愈和 `init_nginx_stream()` 跳过/验证逻辑统一使用该 helper。
+  - `init_nginx_stream()` 写入 include 前会在临时 nginx.conf 中清理旧 marker/include 行，再追加规范 marker 与 include，避免 marker-only 漂移残留。
+- 拒绝意见：
+  - WSL Claude：未发现 P0-P2，建议提交 v6.07。主笔拒绝“无需改动”的结论；Codex marker-only 问题能通过删除真实 include 行、保留 marker 的方式复现。
+  - WSL Codex P3：`.snap-recover.*` 早期快照失败可能短期残留，拒绝作为本轮改动。入口已有超过 1 天 stale sweep，恢复 EXIT 广扫会重新引入误删活跃快照风险。
+  - WSL Claude P3：无标记自愈中 `init_nginx_stream()` 可能调用两次，暂缓。函数幂等，当前优先修正 include 真实性校验，不为低收益精简再扩大改动面。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转新增 `_main_stream_include_valid()`，防止仅有 marker 注释但真实 include 行丢失时被判为正常。
+  - `init_nginx_stream()`、`show_status()`、无标记 reconcile 和已安装 reconcile 改用完整 include 校验。
+  - `init_nginx_stream()` 注入 include 前清理临时 nginx.conf 里的旧 marker/include 行，再写入规范 include。
+  - 两脚本版本统一提升到 `v6.08`；落地脚本仅同步版本号，落地业务逻辑不变。
+  - README 和两份指南同步当前 v6.08 事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - WSL Codex/GPT-5.5 新会话审查：发现并接受 marker-only include P1。
+  - WSL Claude Code/Claude 4.7 新会话审查：未发现 P0-P2；其结论已裁决。
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 中转机实机 marker-only nginx.conf 故障注入、删除路由 Ctrl-C 注入、真实 Nginx reload 失败注入或长时间运行验证。
+- Commit:
+  - 本次三轮合并提交：`fix: harden transit route recovery v6.08`

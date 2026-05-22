@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.05.sh — 落地机安装脚本 v6.05
+# install_landing_v6.08.sh — 落地机安装脚本 v6.08
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.05: 同步版本号；落地业务逻辑不变。
+# v6.08: 同步版本号；落地业务逻辑不变。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.05"
+readonly VERSION="v6.08"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -47,8 +47,8 @@ readonly UPDATE_WARN_FILE="/var/run/xray-landing.update.warn"
 find /etc/xray-landing /etc/landing_manager /etc/nginx /etc/systemd/system \
   -maxdepth 5 -name '.snap-recover.*' -mtime +1 -delete 2>/dev/null || true
 
-# BUG-02: 中断时清理 atomic_write 残留的临时文件及事务快照
-# v2.32 Gemini: 统一当次全清——操作锁保证同一时刻只有一个事务，快照不需要跨日保留
+# BUG-02: 中断时只清理 atomic_write/暂存残留；事务快照由各事务自行提交/回滚。
+# 不在 EXIT 广扫 .snap-recover.*，避免只读或失败路径误删其他实例的活跃回滚快照。
 # [v2.13 GPT-🔴 + Grok-🔴] Cleanup restricted exclusively to script-owned directories.
 # /tmp/xray_tmp_* moved to MANAGER_BASE/tmp; .manager.* staging files likewise.
 # No broad /tmp scan to avoid accidentally deleting unrelated user files.
@@ -56,10 +56,10 @@ _global_cleanup(){
   find /etc/xray-landing /etc/landing_manager \
     /etc/systemd/system /etc/logrotate.d \
     -maxdepth 5 \
-    \( -name '.xray-landing.*' -o -name '.tmp-node-*.conf' -o -name '.snap-recover.*' -o -name '.manager.*' \) \
+    \( -name '.xray-landing.*' -o -name '.tmp-node-*.conf' -o -name '.manager.*' \) \
     -type f -delete 2>/dev/null || true
   find /etc/nginx -maxdepth 5 \
-    \( -name '.xray-landing.*' -o -name '.snap-recover.*' \) \
+    -name '.xray-landing.*' \
     -type f -delete 2>/dev/null || true
   # Script-owned tmp — Xray download dirs and staging files only
   rm -rf "${MANAGER_BASE}/tmp/xray_tmp_"* 2>/dev/null || true

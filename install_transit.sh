@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.05.sh — 中转机安装脚本 v6.05
+# install_transit_v6.08.sh — 中转机安装脚本 v6.08
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.05: .map 必须精确等于 .meta 投影，防隐藏 SNI 路由残留。
+# v6.08: stream include 校验必须同时包含 marker 和真实 include 行。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.05"
+readonly VERSION="v6.08"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -46,8 +46,8 @@ _delete_input_refs_to_chain(){
 find /etc/transit_manager /etc/nginx /etc/systemd/system \
   -maxdepth 5 -name '.snap-recover.*' -mtime +1 -delete 2>/dev/null || true
 
-# BUG-02: 中断时清理 atomic_write 残留的临时文件及事务快照
-# v2.32 Gemini: 统一当次全清——操作锁保证同一时刻只有一个事务，快照不需要跨日保留
+# BUG-02: 中断时只清理 atomic_write 残留；事务快照由各事务自行提交/回滚。
+# 不在 EXIT 广扫 .snap-recover.*，避免只读状态检查误删其他实例的活跃回滚快照。
 # [v2.13 GPT-🔴 + Grok-🔴] Cleanup restricted exclusively to script-owned directories.
 # Broad /tmp scans risk touching unrelated user files; all scratch files are now under
 # ${MANAGER_BASE}/tmp so a targeted find there is sufficient and safe.
@@ -55,12 +55,12 @@ _global_cleanup(){
   find /etc/transit_manager /etc/nginx \
     /etc/systemd/system /etc/logrotate.d \
     -maxdepth 5 \
-    \( -name '.transit-mgr.*' -o -name '.snap-recover.*' \) \
+    -name '.transit-mgr.*' \
     -type f -delete 2>/dev/null || true
   # Script-owned tmp — the only scratch space used since v2.13
   find "${MANAGER_BASE}/tmp" \
     -maxdepth 1 -type f \
-    \( -name '.transit-mgr.*' -o -name '.snap-recover.*' -o -name '.nginx-conf-snap.*' \) \
+    \( -name '.transit-mgr.*' -o -name '.nginx-conf-snap.*' \) \
     -delete 2>/dev/null || true
 }
 _emit_update_warning(){
@@ -397,6 +397,11 @@ _stream_conf_valid(){
   grep -q 'upstream fallback_blackhole' "$NGINX_STREAM_CONF" 2>/dev/null || return 1
   grep -q 'server 127\.0\.0\.1:9999' "$NGINX_STREAM_CONF" 2>/dev/null || return 1
   grep -q 'default[[:space:]]\+fallback_blackhole' "$NGINX_STREAM_CONF" 2>/dev/null || return 1
+}
+_main_stream_include_valid(){
+  [[ -f "$NGINX_MAIN_CONF" ]] || return 1
+  grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null || return 1
+  grep -qF "include ${NGINX_STREAM_CONF};" "$NGINX_MAIN_CONF" 2>/dev/null || return 1
 }
 _route_key_conflict(){
   local _dom="$1" _exclude="${2:-}" _needle _paths _conflict=""
@@ -893,13 +898,15 @@ init_nginx_stream(){
   rm -f "${SNIPPETS_DIR}/landing_dummy.map" "${SNIPPETS_DIR}/landing_*.map.tmp" 2>/dev/null || true
 
   local _rewrite_existing=0 _had_stream_conf=0 _stream_bak=""
-  if grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null; then
+  if _main_stream_include_valid; then
     if _stream_conf_valid; then
       ensure_fallback_blackhole || return 1
       info "Nginx stream include 已存在，跳过"; return 0
     fi
     warn "Nginx stream 配置缺失或漂移，重写本脚本管理的 stream 配置"
     _rewrite_existing=1
+  elif grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null; then
+    warn "Nginx stream include 标记存在但真实 include 行缺失，重写 include"
   fi
   if grep -qE '^[[:space:]]*stream[[:space:]]*\{' "$NGINX_MAIN_CONF" 2>/dev/null; then
     die "nginx.conf 已存在 stream{} 块（非本脚本），请备份后手动删除再运行"
@@ -976,7 +983,7 @@ stream {
 }
 NGINX_STREAM_EOF
 
-  if grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null; then
+  if _main_stream_include_valid; then
     if ! nginx -t 2>&1; then
       if (( _rewrite_existing )); then
         if (( _had_stream_conf )) && [[ -f "${_stream_bak:-}" ]]; then
@@ -1003,6 +1010,8 @@ NGINX_STREAM_EOF
   [[ -n "$_mc_tmp" ]] || die "mktemp returned empty path"
   cp -f "$NGINX_MAIN_CONF" "$_mc_tmp" \
     || die "snapshot nginx.conf failed"
+  sed -i "\#${STREAM_INCLUDE_MARKER}#d" "$_mc_tmp" 2>/dev/null || true
+  sed -i "\#include ${NGINX_STREAM_CONF};#d" "$_mc_tmp" 2>/dev/null || true
   printf '\n# %s\n' "$STREAM_INCLUDE_MARKER"  >> "$_mc_tmp"
   printf 'include %s;\n'    "$NGINX_STREAM_CONF" >> "$_mc_tmp"
   chmod 644 "$_mc_tmp" \
@@ -1010,7 +1019,7 @@ NGINX_STREAM_EOF
   mv -f "$_mc_tmp" "$NGINX_MAIN_CONF" \
     || die "promote _mc_tmp to nginx.conf failed"
   # 验证注入成功
-  grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" \
+  _main_stream_include_valid \
     || die "nginx.conf include 注入失败，请检查文件权限: ${NGINX_MAIN_CONF}"
 
   if ! nginx -t 2>/dev/null; then
@@ -1107,12 +1116,20 @@ _meta_file_valid(){
 remove_landing_snippet(){
   local domain="$1"
   local safe; safe=$(domain_to_safe "$domain")
-  local removed=0
+  local removed=0 failed=0
   for f in "${SNIPPETS_DIR}/landing_${safe}.map" \
             "${SNIPPETS_DIR}/landing_${safe}.upstream" \
             "${CONF_DIR}/${safe}.meta"; do
-    [[ -f "$f" ]] && { rm -f "$f"; (( ++removed )) || true; }
+    if [[ -f "$f" ]]; then
+      if rm -f "$f"; then
+        (( ++removed )) || true
+      else
+        warn "删除路由片段失败: $f"
+        failed=1
+      fi
+    fi
   done
+  (( failed == 0 )) || return 1
   (( removed > 0 )) && success "已删除路由片段: ${domain}" \
     || { warn "未找到路由配置: ${domain}"; return 1; }
 }
@@ -1494,9 +1511,21 @@ _atomic_apply_route(){
   local _map_key; _map_key=$(nginx_domain_str "$domain")
   [[ -n "$_map_key" && ${#_map_key} -le 200 ]] \
     || { rm -f "$tmp_map" 2>/dev/null; die "域名过滤后为空或超长，拒绝写入 map: ${domain}"; }
-  printf '    %s    %s:%s;\n' "$_map_key" "$(nginx_ip_str "$ip")" "$port" > "$tmp_map"
-  chmod 600 "$tmp_map"
-  mv -f "$tmp_map" "$map_target"
+  if ! printf '    %s    %s:%s;\n' "$_map_key" "$(nginx_ip_str "$ip")" "$port" > "$tmp_map"; then
+    rm -f "$tmp_map" 2>/dev/null || true
+    _route_rollback; _restore_prev_route_traps
+    die "写入临时 .map 失败，已回滚"
+  fi
+  if ! chmod 600 "$tmp_map"; then
+    rm -f "$tmp_map" 2>/dev/null || true
+    _route_rollback; _restore_prev_route_traps
+    die "设置临时 .map 权限失败，已回滚"
+  fi
+  if ! mv -f "$tmp_map" "$map_target"; then
+    rm -f "$tmp_map" 2>/dev/null || true
+    _route_rollback; _restore_prev_route_traps
+    die "提交 .map 失败，已回滚"
+  fi
   chmod 600 "$map_target" 2>/dev/null || true
 
   # 3. nginx -t 验证
@@ -1514,9 +1543,17 @@ _atomic_apply_route(){
 
   local tmp_meta; tmp_meta=$(mktemp "${CONF_DIR}/.snap-recover.XXXXXX") \
     || die "mktemp tmp_meta failed"
-  printf 'DOMAIN=%s\nTRANSIT_IP=%s\nPORT=%s\nUUID=%s\nPWD=%s\nPFX=%s\nCREATED=%s\n' \
-    "$domain" "$ip" "$port" "$uuid" "$pwd" "$pfx" "$(date +%Y%m%d_%H%M%S)" > "$tmp_meta"
-  chmod 600 "$tmp_meta"
+  if ! printf 'DOMAIN=%s\nTRANSIT_IP=%s\nPORT=%s\nUUID=%s\nPWD=%s\nPFX=%s\nCREATED=%s\n' \
+    "$domain" "$ip" "$port" "$uuid" "$pwd" "$pfx" "$(date +%Y%m%d_%H%M%S)" > "$tmp_meta"; then
+    rm -f "$tmp_meta" 2>/dev/null || true
+    _route_rollback; _restore_prev_route_traps
+    die "写入临时 .meta 失败，.map 已回滚"
+  fi
+  if ! chmod 600 "$tmp_meta"; then
+    rm -f "$tmp_meta" 2>/dev/null || true
+    _route_rollback; _restore_prev_route_traps
+    die "设置临时 .meta 权限失败，.map 已回滚"
+  fi
   if ! mv -f "$tmp_meta" "$meta_target"; then
     rm -f "$tmp_meta" 2>/dev/null || true
     _route_rollback; _restore_prev_route_traps
@@ -1787,7 +1824,7 @@ print(decoded)
   # ARCH-2: 传入 uuid/pwd/pfx，meta 中持久化；generate_nodes() 读取后生成完整订阅
   local _transit_public_ip
   _transit_public_ip=$(get_public_ip --strict)
-  _atomic_apply_route "$dom" "$ip" "$port" "$uuid" "$pwd" "$pfx" || die "Route application failed"
+  _atomic_apply_route "$dom" "$ip" "$port" "$uuid" "$pwd" "$pfx"
   # Commit install marker only after route is durably applied
   [[ -f "$INSTALLED_FLAG" ]] || touch "$INSTALLED_FLAG"
   __TRANSIT_IMPORT_TRAP_ACTIVE=0
@@ -1907,17 +1944,49 @@ delete_landing_route(){
       || die "snapshot landing meta failed"
   }
 
-  remove_landing_snippet "$DEL_DOMAIN"
+  local _delete_route_active=1
+  local _prev_delete_err_trap _prev_delete_int_trap _prev_delete_term_trap
+  _prev_delete_err_trap=$(trap -p ERR || true)
+  _prev_delete_int_trap=$(trap -p INT || true)
+  _prev_delete_term_trap=$(trap -p TERM || true)
+  _restore_prev_delete_traps(){
+    if [[ -n "${_prev_delete_err_trap:-}" ]]; then eval "$_prev_delete_err_trap" || trap - ERR; else trap - ERR; fi
+    if [[ -n "${_prev_delete_int_trap:-}" ]]; then eval "$_prev_delete_int_trap" || trap - INT; else trap - INT; fi
+    if [[ -n "${_prev_delete_term_trap:-}" ]]; then eval "$_prev_delete_term_trap" || trap - TERM; else trap - TERM; fi
+  }
+  _delete_route_rollback(){
+    [[ "${_delete_route_active:-0}" == "1" ]] || return 0
+    _delete_route_active=0
+    [[ -n "${_bak_map:-}"  && -f "${_bak_map:-}"  ]] && mv -f "$_bak_map"  "${SNIPPETS_DIR}/landing_${safe_del}.map"  2>/dev/null || true
+    [[ -n "${_bak_meta:-}" && -f "${_bak_meta:-}" ]] && mv -f "$_bak_meta" "${CONF_DIR}/${safe_del}.meta"             2>/dev/null || true
+    rm -f "${_bak_map:-}" "${_bak_meta:-}" 2>/dev/null || true
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null \
+        || warn "删除路由回滚后 Nginx reload/restart 失败，请手动检查"
+    else
+      warn "删除路由回滚后 Nginx 配置仍无法通过校验，请手动检查"
+    fi
+    _release_lock
+  }
+  trap '_delete_route_rollback; _restore_prev_delete_traps; exit 1' INT TERM ERR
 
-  if ! ( nginx_reload ); then
-    warn "Nginx 热重载失败，恢复被删配置..."
-    [[ -n "$_bak_map"  ]] && mv -f "$_bak_map"  "${SNIPPETS_DIR}/landing_${safe_del}.map" 2>/dev/null || true
-    [[ -n "$_bak_meta" ]] && mv -f "$_bak_meta" "${CONF_DIR}/${safe_del}.meta"             2>/dev/null || true
-    rm -f "$_bak_map" "$_bak_meta" 2>/dev/null || true
-    _release_lock; die "删除回滚完成，Nginx 运行态未受影响"
+  local _delete_ok=1
+  if ! remove_landing_snippet "$DEL_DOMAIN"; then
+    warn "路由片段删除未完整成功，恢复被删配置..."
+    _delete_ok=0
   fi
+
+  if (( _delete_ok == 0 )) || ! ( nginx_reload ); then
+    (( _delete_ok == 0 )) || warn "Nginx 热重载失败，恢复被删配置..."
+    _delete_route_rollback
+    _restore_prev_delete_traps
+    die "删除回滚完成，Nginx 运行态未受影响"
+  fi
+  _delete_route_active=0
+  _restore_prev_delete_traps
   rm -f "$_bak_map" "$_bak_meta" 2>/dev/null || true
   _release_lock
+  unset -f _delete_route_rollback _restore_prev_delete_traps
   success "落地机路由 ${DEL_DOMAIN} 已删除并热重载生效"
 }
 
@@ -1944,7 +2013,7 @@ show_status(){
   _fallback_blackhole_ok \
     && echo "  SNI 黑洞服务:    ✓" \
     || { echo -e "  ${RED}SNI 黑洞服务:    ✗ 127.0.0.1:9999 缺失${NC}"; _ok=0; }
-  grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null \
+  _main_stream_include_valid \
     && echo "  stream include:  ✓" \
     || { echo -e "  ${RED}stream include:  ✗ nginx.conf 中已丢失${NC}"; _ok=0; }
   _stream_conf_valid \
@@ -2337,11 +2406,18 @@ main(){
   if [[ ! -f "$INSTALLED_FLAG" ]]; then
     local _durable_transit=0
     local _durable_transit_blocked=0
-    if grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null &&        find "$CONF_DIR" -maxdepth 1 -type f -name "*.meta" 2>/dev/null | grep -q .; then
-      if ! _meta_drift_detect; then
-        warn "[reconcile] durable set has meta/map drift — attempting .map repair before reinstall"
+    local _has_meta_without_flag=0 _has_include_without_flag=0
+    find "$CONF_DIR" -maxdepth 1 -type f -name "*.meta" 2>/dev/null | grep -q . && _has_meta_without_flag=1
+    _main_stream_include_valid && _has_include_without_flag=1
+    if (( _has_meta_without_flag )); then
+      if (( _has_include_without_flag == 0 )) || ! _meta_drift_detect; then
+        warn "[reconcile] durable set has meta but install flag/include/map may be incomplete — attempting repair before reinstall"
         _acquire_lock
-        if _repair_maps_from_meta 2>/dev/null && _meta_drift_detect 2>/dev/null; then
+        _repair_maps_from_meta 2>/dev/null || true
+        if (( _has_include_without_flag == 0 )); then
+          init_nginx_stream 2>/dev/null || true
+        fi
+        if _meta_drift_detect 2>/dev/null && init_nginx_stream 2>/dev/null && nginx_reload 2>/dev/null; then
           _durable_transit=1
         else
           _durable_transit_blocked=1
@@ -2366,21 +2442,22 @@ main(){
     # [v2.8 Architect-🟠] Startup stale-marker reconciliation: verify the durable set
     # (nginx stream include + at least one .meta file). A SIGKILL during import_token's
     # first-time path can write INSTALLED_FLAG while nginx artifacts are incomplete.
-    local _durable_transit=1
-    grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null       || _durable_transit=0
-    find "$CONF_DIR" -name "*.meta" -type f -maxdepth 1 2>/dev/null \
-         | grep -q . 2>/dev/null                                           || _durable_transit=0
-    if (( _durable_transit == 0 )); then
-      warn "[v2.8] 安装标记存在但持久化集（stream include/meta）不完整，清除标记重新安装..."
+    local _durable_transit=1 _has_meta=0
+    _main_stream_include_valid                                             || _durable_transit=0
+    find "$CONF_DIR" -maxdepth 1 -name "*.meta" -type f 2>/dev/null \
+         | grep -q . 2>/dev/null                                           && _has_meta=1
+    if (( _has_meta == 0 )); then
+      warn "[v2.8] 安装标记存在但 .meta 真相源缺失，清除标记重新安装..."
       rm -f "$INSTALLED_FLAG"
       fresh_install
       return
     fi
+    (( _durable_transit == 0 )) && warn "[reconcile] stream include 缺失但 .meta 仍存在，将先尝试自动修复"
     # 🟠 GPT: .installed 降为辅助证据，三态交叉校验（nginx/stream-include/meta文件）
     local _svc_ok=0 _inc_ok=0 _meta_ok=0
     systemctl is-active --quiet nginx 2>/dev/null && _svc_ok=1 \
       || warn "Nginx 未运行"
-    grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null && _inc_ok=1 \
+    _main_stream_include_valid && _inc_ok=1 \
       || warn "stream include 已丢失"
     local _mc; _mc=$(find "$CONF_DIR" -name "*.meta" -type f 2>/dev/null | wc -l)
     (( _mc > 0 )) && _meta_ok=1
