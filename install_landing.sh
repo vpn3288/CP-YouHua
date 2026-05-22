@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.20.sh — 落地机安装脚本 v6.20
+# install_landing_v6.21.sh — 落地机安装脚本 v6.21
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.20: Trojan-TCP 节点链接改用 alpn=http/1.0，服务端配置不变。
+# v6.21: h2 fallback 精确匹配 gRPC serviceName path，避免 Trojan-TCP 被误分流到 gRPC。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.20"
+readonly VERSION="v6.21"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -1551,7 +1551,7 @@ cfg = {
                     #              inbounds.settings.fallbacks[].alpn       → string (fixed here).
                     # Arrays caused status=23 from Xray's JSON schema validator.
                     # [v5.30-CRITICAL-3] 删除Trojan-gRPC fallback - 两个alpn=h2规则冲突，只保留VLESS-gRPC
-                    {"alpn": "h2", "dest": PORT_VLESS_GRPC,  "xver": 0},
+                    {"alpn": "h2", "path": f"/{PFX}-vg", "dest": PORT_VLESS_GRPC,  "xver": 0},
                     # WS: alpn=http/1.1 + path match; Trojan-TCP: no alpn/path = catch-all
                     {"alpn": "http/1.1", "path": f"/{PFX}-vw", "dest": PORT_VLESS_WS, "xver": 0},
                     {"dest": PORT_TROJAN_TCP, "xver": 0}

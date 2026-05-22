@@ -184,6 +184,8 @@ if 'type=tcp&alpn=http/1.0' not in transit or 'type=tcp&alpn=http/1.0' not in la
     die("Trojan-TCP links must use explicit alpn=http/1.0")
 if 'type=tcp&alpn=#{urllib.parse.quote' in transit or 'type=tcp&alpn="\\n' in landing:
     die("Trojan-TCP links must not emit empty alpn")
+if '{"alpn": "h2", "path": f"/{PFX}-vg", "dest": PORT_VLESS_GRPC' not in landing:
+    die("landing h2 fallback must match gRPC path so Trojan-TCP h2 clients fall through to Trojan")
 
 print(f"OK: static invariants for {tv}")
 PY

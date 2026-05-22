@@ -1305,3 +1305,42 @@
   - 本轮已验证服务器端 Trojan 链路可通，但还需要用户用客户端重新导入 v6.20 生成的订阅或手动把 Trojan-TCP 节点 ALPN 改成 `http/1.0` 后复测。
 - Commit:
   - 待提交 `fix: use http10 alpn for trojan tcp v6.20`
+
+## 2026-05-23 第 31 轮 - v6.21
+
+- 主笔：Codex/GPT-5.5
+- 审查者：用户复测反馈；主笔本地下载官方 Xray-core 做真实客户端验证。
+- 本轮目标：在本地电脑真实验证 Trojan-TCP，定位 v6.20 后仍不通的根因并修复。
+- 接受意见：
+  - 用户复测：v6.20 生成的 Trojan-TCP 节点仍不通。
+  - 本地主机到中转机 `38.59.243.23:443` TCP 与 TLS/SNI 握手正常，能拿到落地域名证书，排除中转端口不可达。
+  - 本地官方 Xray-core 26.3.27 + SOCKS 测试显示 Trojan 出站连接建立，但返回首包为 HTTP/2 SETTINGS 帧，说明请求被落地机主入口的 `h2` fallback 分流到了 VLESS-gRPC 入口，而不是 Trojan-TCP。
+  - 临时把落地机主入口 `h2` fallback 增加 `path="/3d8368e2-vg"` 后，本地 Xray Trojan 真实代理访问 `http://example.com/`、`https://api.ipify.org`、`https://www.cloudflare.com/cdn-cgi/trace` 全部成功，出口 IP 为落地机 `47.251.82.237`。
+- 拒绝意见：
+  - 不接受删除 gRPC 协议；gRPC 是当前 4 协议之一。正确修复是让 `h2` fallback 只匹配 gRPC serviceName path，其他 h2 客户端流量继续落入 Trojan catch-all。
+- 修改文件：
+  - `install_landing.sh`
+  - `install_transit.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地 Xray 配置生成中，主入口 `h2` fallback 从无条件 `{"alpn":"h2"}` 改为 `{"alpn":"h2","path":"/<pfx>-vg"}`，只匹配 VLESS-gRPC 的 serviceName path。
+  - 这样 Xray/NekoBox 等 Trojan 客户端即使默认协商 h2，也不会被 gRPC fallback 抢走，会落到 Trojan-TCP catch-all。
+  - 本地静态不变量新增 h2 fallback 必须带 gRPC path 的检查。
+  - 两脚本版本统一提升到 `v6.21`；中转脚本仅同步版本，业务逻辑不变。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash -n tests/local_static_invariants.sh`
+  - `bash -n tests/pre_real_machine_local_gate.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+  - 已在落地机临时应用同等配置并重启 `xray-landing` 成功。
+  - 已在本地官方 Xray-core 26.3.27 通过 SOCKS 真实访问成功，出口 IP 为 `47.251.82.237`。
+- 残留风险：
+  - 需要用户客户端重新测试 Trojan-TCP；服务端已应用同等临时修复，脚本提交后会上传最新版保持后续重建不回退。
+- Commit:
+  - 待提交 `fix: constrain h2 fallback for trojan tcp v6.21`
