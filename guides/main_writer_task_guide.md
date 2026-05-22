@@ -16,10 +16,10 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前已上传脚本事实：
 
-- 当前远端提交（本轮 v6.11 未推送前）: `9223d5a fix: harden transit route recovery v6.08`
+- 当前远端提交（本轮 v6.14 未推送前）: `fc65f6c fix: harden landing install rollback v6.11`
 - 中转脚本当前文件名: `install_transit.sh`
 - 落地脚本当前文件名: `install_landing.sh`
-- 两脚本头部版本: `v6.11`
+- 两脚本头部版本: `v6.14`
 - 当前工作区已通过 `git ls-files --eol` 验证为 LF；若未来出现 CRLF 并导致 `bash -n` 报 `$'{\r'`，列为 P0。
 
 第一轮真实优化已完成：
@@ -109,17 +109,17 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 ## 4. 当前脚本架构事实
 
-主笔每轮必须重新读取脚本，以下事实只描述当前 `v6.11` 脚本。
+主笔每轮必须重新读取脚本，以下事实只描述当前 `v6.14` 脚本。
 
 ### 4.1 中转脚本事实
 
 当前中转脚本头部写明：
 
-- `install_transit_v6.11.sh`
+- `install_transit_v6.14.sh`
 - 架构：CN2 GIA 纯 IPv4 中转机。
 - Nginx stream SNI 盲传。
 - 禁止代理核心和 IPv6 业务路径。
-- 当前版本说明：同步版本号；中转业务逻辑不变。
+- 当前版本说明：导入 token 先做无副作用粗校验，坏输入不触发依赖安装。
 
 关键结构：
 
@@ -160,12 +160,12 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前落地脚本头部写明：
 
-- `install_landing_v6.11.sh`
+- `install_landing_v6.14.sh`
 - 架构：美国落地机。
 - Xray-core 4 协议单端口回落。
 - Cloudflare DNS-01 证书。
 - 禁止 IPv6 业务路径。
-- 当前版本说明：持久标记脚本安装的 Nginx，卸载时只停止自带 Nginx。
+- 当前版本说明：收紧安装回滚、自愈锁和无头公网 IP 输入边界。
 
 关键结构：
 
@@ -311,7 +311,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 每次真实优化后，两脚本版本必须统一递增。
 
-当前基线是 `v6.11`。下一轮真实优化应统一为 `v6.12`。默认真实修复要涨版本。
+当前基线是 `v6.14`。下一轮真实优化应统一为 `v6.15`。默认真实修复要涨版本。
 
 同步范围：
 

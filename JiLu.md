@@ -861,3 +861,117 @@
   - 当前落地机已被早期 v6.09/v6.10 测试安装过依赖，下一轮应优先重新 DD 或手工恢复干净状态后复测 v6.11 完整路径。
 - Commit:
   - 本次三轮合并提交：待提交 `fix: harden landing install rollback v6.11`
+
+## 2026-05-22 第 22 轮 - v6.12
+
+- 主笔：Codex/GPT-5.5
+- 审查者：实机 v6.11 失败回滚测试；主笔本地裁决
+- 本轮目标：复测 v6.11 证书前失败回滚，修复 Debian 默认 Nginx 站点与 IPv4-only/DNS-01 架构冲突。
+- 接受意见：
+  - 实机测试 P1：落地脚本禁用 IPv6 后，Debian 默认 Nginx 站点仍含 `listen [::]:80 default_server;`，`nginx -t` 通过但 `systemctl start nginx` 失败。
+  - 实机测试 P1：默认站点即使能启动也会公开监听 `0.0.0.0:80`，违背 Cloudflare DNS-01 不占用 80 端口的安装契约。
+  - 实机测试 P2：失败回滚后应 `reset-failed nginx`，避免端口已清理但 systemd 仍显示 failed。
+- 拒绝意见：
+  - 不接受删除用户自定义 Nginx 站点：仅在 `/etc/nginx/sites-enabled/default` 是 Debian 默认站点软链且匹配默认站点特征时禁用，并用脚本标记决定是否恢复。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 新增 `disable_packaged_nginx_default_site()`，安装 fallback 前禁用 Debian 默认站点，避免公网 80 和 IPv6 listen。
+  - 新增 `restore_packaged_nginx_default_site()`，当 Nginx 不是本脚本安装时，回滚/卸载会恢复默认站点软链；脚本安装的 Nginx 则保持禁用并 stop/disable。
+  - fresh install 回滚增加 `systemctl reset-failed nginx`。
+  - 两脚本版本统一提升到 `v6.12`；中转脚本仅同步版本号，中转业务逻辑不变。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - 实机复现：v6.11 使用格式正确的假 Token 触发证书前失败，回滚后无 80 监听，但 nginx 留在 failed；`systemctl status nginx` 与默认站点 `[::]:80` 证实根因。
+- 残留风险：
+  - v6.12 尚未上传到实机复测；当前 Cloudflare Token 仍无 DNS 写权限，完整证书/节点连通测试继续阻塞。
+- Commit:
+  - 待第 24 轮真实优化合并提交。
+
+## 2026-05-22 第 23 轮 - v6.13
+
+- 主笔：Codex/GPT-5.5
+- 审查者：实机 v6.12 fallback 启动失败复查；主笔本地裁决
+- 本轮目标：继续定位落地机 Nginx fallback 启动失败根因，补齐 systemd 沙箱写路径。
+- 接受意见：
+  - 实机测试 P1：手工无 drop-in 启动同一 fallback 配置可以成功；脚本路径失败点不在 Nginx 配置语法或默认站点。
+  - 主笔复核 P1：落地 `_tune_nginx_worker_connections()` 设置 `ProtectSystem=strict`，但没有中转脚本已有的 `ReadWritePaths=/var/log/nginx /var/lib/nginx /run /var/run`，会导致 systemd 启动期写 pid/log/cache 路径失败；`nginx -t` 无法覆盖这个 systemd 沙箱问题。
+- 拒绝意见：
+  - 不接受移除 `ProtectSystem=strict`：直接放宽沙箱会降低长期安全性；按中转脚本成熟模式只开放 Nginx 必需写路径更稳。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地 Nginx systemd drop-in 增加 `ReadWritePaths=/var/log/nginx /var/lib/nginx /run /var/run`。
+  - 写 drop-in 前预创建 `/var/log/nginx` 与 `/var/lib/nginx`，避免 systemd namespace 因路径不存在而启动失败。
+  - 两脚本版本统一提升到 `v6.13`；中转脚本仅同步版本号，中转业务逻辑不变。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - 实机复现：禁用默认站点后，手工无 drop-in 的 fallback 配置可启动，说明 v6.12 剩余失败来自 systemd drop-in 沙箱。
+  - v6.13 已上传到落地机和中转机；落地机使用格式正确的假 Token 复测 headless 失败路径，Nginx fallback 可启动，随后在 Cloudflare Token 校验阶段失败并回滚。
+  - v6.13 回滚后落地机 `nginx/xray-landing` 均 inactive，nginx disabled，无 80/8443/45231/45232 监听，仅 SSH 监听。
+- 残留风险：
+  - 当前 Cloudflare Token 仍无 DNS 写权限，完整证书/节点连通测试继续阻塞；落地机经历多轮失败测试后仍残留 `/etc/landing_manager/tmp/landing-manager.lock` 空锁文件，功能风险低，下一轮可通过重装系统复测干净路径。
+- Commit:
+  - 待第 24 轮真实优化合并提交。
+
+## 2026-05-22 第 24 轮 - v6.14
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：复审 v6.13 未提交安装回滚补丁，修复坏输入副作用、Nginx 默认站点恢复顺序和落地主入口自愈并发边界。
+- 接受意见：
+  - WSL Codex P1：用户自带 Nginx 路径中先恢复 Debian 默认站点再 reload/restart，可能重触发 `[::]:80` 启动失败；应先 reload 清掉脚本 fallback，再只把默认站点软链恢复到磁盘。
+  - WSL Claude P1：落地主入口恢复 `*.conf.deleting`、服务自愈重写配置/防火墙时未拿全局锁，可能与另一个终端的新增/删除/改端口并发写状态。
+  - WSL Claude P1：中转 `--import` 坏 token 在解析前执行 `check_deps`，干净机器会先安装依赖再报错。
+  - WSL Claude P2：`FAKE_IP` 仍可进入落地 Token；DNS-01 的 A 记录可用非落地 IP，但中转导入 Token 的 `ip` 必须是真实落地公网 IPv4。
+  - WSL Claude P2：新增节点文件名碰撞在证书成功后直接 `die`，可能留下孤儿证书/acme 登记。
+- 拒绝意见：
+  - 不接受移除 Nginx `ProtectSystem=strict` 或扩大监听面；v6.13 已按最小写路径修复 sandbox 问题。
+  - 不接受把“虚假 IP”写入 Token；这会直接破坏中转到落地的真实路由。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转 `import_token()` 在 `check_deps` 前先做长度和 Base64 形态粗校验，坏输入不触发 Nginx/chrony/python 依赖安装。
+  - 落地 `purge_all()` 和 fresh install 回滚在恢复 Debian 默认站点前先 reload 用户自带 Nginx，且不再 fallback 到 restart，避免把 `[::]:80` 默认站点重新拉入运行态。
+  - 落地主入口 `*.conf.deleting` 恢复、缺失安装标记恢复、服务自动恢复写操作进入 `_acquire_lock/_release_lock`。
+  - headless 模式检测到 `FAKE_IP` 直接失败，要求使用真实落地公网 IPv4 的 `LANDING_AUTO_PUBLIC_IP`。
+  - 新增节点文件名碰撞改走 `_cancel_add_node_before_trap`，证书和临时节点半状态会一起清理。
+  - 两脚本版本统一提升到 `v6.14`。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - 已检查仓库内无用户提供的 GitHub Token、Cloudflare Token、服务器密码或 Cloudflare Account ID 明文。
+- 残留风险：
+  - 本轮已做静态验证，尚未重新 DD 两台 Debian 12 实机跑完整首装、DNS-01 成功、节点连通、中转导入、卸载重装循环。
+  - 完整 DNS-01 成功路径需要一个已轮换且具备 `Zone:DNS:Edit + Zone:Zone:Read` 的测试 Token；聊天中暴露过的 GitHub/Cloudflare 密钥必须废弃并重新生成。
+- Commit:
+  - 待提交 `fix: harden landing install rollback v6.14`

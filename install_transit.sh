@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.11.sh — 中转机安装脚本 v6.11
+# install_transit_v6.14.sh — 中转机安装脚本 v6.14
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.11: 同步版本号；中转业务逻辑不变。
+# v6.14: 导入 token 先做无副作用粗校验，坏输入不触发依赖安装。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.11"
+readonly VERSION="v6.14"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -1691,13 +1691,22 @@ PYGEN
   return 0
 }
 
+precheck_import_token_shape(){
+  local raw="$1"
+  [[ -n "$raw" ]] || die "需要 token 参数"
+  raw=$(printf '%s' "$raw" | tr -d ' \n\r\t')
+  (( ${#raw} <= 2048 )) || die "token 过长（${#raw} 字节），拒绝解析"
+  if [[ ! "$raw" =~ (eyJ|eyA)[A-Za-z0-9+/=]{20,} && ! "$raw" =~ ^[A-Za-z0-9+/=]{40,}$ ]]; then
+    die "token 形态非法，请从落地机复制完整的 Base64 导入 token"
+  fi
+}
+
 import_token(){
   local raw="$1"
   [[ -n "$raw" ]] || die "需要 token 参数"
   raw=$(printf '%s' "$raw" | tr -d ' \n\r\t')
-  # 🟠 Grok: 拒绝超长输入（正常 token <1KB），防止畸形 JSON 绕过解析
+  precheck_import_token_shape "$raw"
   check_deps
-  (( ${#raw} <= 2048 )) || die "token 过长（${#raw} 字节），拒绝解析"
 
   local json=""
   json=$(printf '%s' "$raw" | python3 -c "
@@ -2390,6 +2399,7 @@ main(){
   if [[ "${1:-}" == "--uninstall" ]]; then purge_all; exit 0; fi
   if [[ "${1:-}" == "--import" ]]; then
     # v2.32: --import 直接调用时加锁；通过 add_landing_route 间接调用时锁已由调用方持有
+    precheck_import_token_shape "${2:-}"
     _acquire_lock; import_token "${2:-}"; _release_lock; exit 0
   fi
   if [[ "${1:-}" == "--status" ]]; then show_status; exit $?; fi

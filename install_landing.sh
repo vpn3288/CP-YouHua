@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.11.sh — 落地机安装脚本 v6.11
+# install_landing_v6.14.sh — 落地机安装脚本 v6.14
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.11: 持久标记脚本安装的 Nginx，卸载时只停止自带 Nginx。
+# v6.14: 收紧安装回滚、自愈锁和无头公网 IP 输入边界。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.11"
+readonly VERSION="v6.14"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -33,6 +33,7 @@ readonly INSTALLED_FLAG="${MANAGER_BASE}/.installed"
 readonly MANAGER_CONFIG="${MANAGER_BASE}/manager.conf"
 readonly NGINX_CONF_ORIG="${MANAGER_BASE}/nginx.conf.orig"
 readonly NGINX_INSTALLED_FLAG="${MANAGER_BASE}/.nginx_installed_by_script"
+readonly NGINX_DEFAULT_SITE_DISABLED_FLAG="${MANAGER_BASE}/.nginx_default_site_disabled_by_script"
 # BUG-6 FIX: ACME_HOME 不能 readonly，后续需要通过 env 传递给子进程
 # readonly 会导致部分 bash 版本对 "env ACME_HOME=..." 报 "readonly variable"
 ACME_HOME="${LANDING_BASE}/acme"
@@ -837,6 +838,7 @@ _tune_nginx_worker_connections(){
   rm -f "$_mc_bak" 2>/dev/null || true
   local od="/etc/systemd/system/nginx.service.d"
   mkdir -p "$od"
+  mkdir -p /var/log/nginx /var/lib/nginx
   local _ov="${od}/landing-override.conf"
   # Always rewrite so re-runs on different-RAM hardware update to the correct value.
   atomic_write "$_ov" 644 root:root <<SVCOV
@@ -845,6 +847,7 @@ LimitNOFILE=${_tmc_fd}
 TasksMax=infinity
 NoNewPrivileges=true
 ProtectSystem=strict
+ReadWritePaths=/var/log/nginx /var/lib/nginx /run /var/run
 ProtectHome=true
 PrivateTmp=true
 UMask=0027
@@ -854,6 +857,31 @@ StandardError=null
 SVCOV
   # [F4] Hard-fail: drop-in on disk but systemd runs stale graph if reload fails
   systemctl daemon-reload || die "daemon-reload failed — drop-in limits will not apply"
+}
+
+disable_packaged_nginx_default_site(){
+  local _link="/etc/nginx/sites-enabled/default"
+  local _target="/etc/nginx/sites-available/default"
+  [[ -L "$_link" ]] || return 0
+  [[ "$(readlink "$_link" 2>/dev/null || true)" == "$_target" ]] || return 0
+  [[ -f "$_target" ]] || return 0
+  if grep -qE 'listen[[:space:]]+\[::\]:80[[:space:]]+default_server' "$_target" 2>/dev/null \
+      || grep -q 'Welcome to nginx' "$_target" 2>/dev/null; then
+    mkdir -p "$MANAGER_BASE" 2>/dev/null || true
+    rm -f "$_link" || die "无法禁用 Debian 默认 Nginx 站点: $_link"
+    touch "$NGINX_DEFAULT_SITE_DISABLED_FLAG" 2>/dev/null || true
+    info "已禁用 Debian 默认 Nginx 站点，避免监听公网 80 或 IPv6"
+  fi
+}
+
+restore_packaged_nginx_default_site(){
+  local _link="/etc/nginx/sites-enabled/default"
+  local _target="/etc/nginx/sites-available/default"
+  [[ -f "$NGINX_DEFAULT_SITE_DISABLED_FLAG" ]] || return 0
+  if [[ "${NGINX_INSTALLED_BY_SCRIPT:-0}" != "1" && ! -f "$NGINX_INSTALLED_FLAG" && -f "$_target" && ! -e "$_link" ]]; then
+    ln -s "$_target" "$_link" 2>/dev/null || warn "恢复 Debian 默认 Nginx 站点失败，请手动检查: $_link"
+  fi
+  rm -f "$NGINX_DEFAULT_SITE_DISABLED_FLAG" 2>/dev/null || true
 }
 
 setup_fallback_decoy(){
@@ -892,6 +920,7 @@ setup_fallback_decoy(){
     touch "$NGINX_INSTALLED_FLAG" 2>/dev/null || true
   fi
   _tune_nginx_worker_connections
+  disable_packaged_nginx_default_site
   atomic_write "$fallback_conf" 644 root:root <<'FDEOF'
 # xray-landing-fallback.conf — 防探针回落站，由脚本管理，请勿手动修改
 # 仅监听 IPv4 环回；Xray fallback 硬编码 127.0.0.1，禁止 IPv6 业务路径。
@@ -2512,12 +2541,10 @@ NEOF_TMP
     _exist_dom=$(grep '^DOMAIN=' "$_node_conf" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
     _exist_tip=$(grep '^TRANSIT_IP=' "$_node_conf" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
     if [[ -n "$_exist_dom" && "$_exist_dom" != "$NEW_DOMAIN" ]]; then
-      rm -f "$_tmp_node"
-      die "节点文件名碰撞：${_node_conf} 已被域名 ${_exist_dom} 使用，拒绝覆盖 ${NEW_DOMAIN}"
+      _cancel_add_node_before_trap "节点文件名碰撞：${_node_conf} 已被域名 ${_exist_dom} 使用，拒绝覆盖 ${NEW_DOMAIN}"
     fi
     if [[ -n "$_exist_tip" && "$_exist_tip" != "$NEW_TRANSIT" ]]; then
-      rm -f "$_tmp_node"
-      die "节点文件名碰撞：${_node_conf} 已被中转 IP ${_exist_tip} 使用，拒绝覆盖 ${NEW_TRANSIT}"
+      _cancel_add_node_before_trap "节点文件名碰撞：${_node_conf} 已被中转 IP ${_exist_tip} 使用，拒绝覆盖 ${NEW_TRANSIT}"
     fi
   fi
   mv -f "$_tmp_node" "$_node_conf"
@@ -3254,8 +3281,11 @@ purge_all(){
   if (( _nginx_installed_by_script )); then
     systemctl stop nginx 2>/dev/null || true
     systemctl disable nginx 2>/dev/null || true
-  elif nginx -t 2>/dev/null; then
-    systemctl reload nginx 2>/dev/null || true
+  else
+    if systemctl is-active --quiet nginx 2>/dev/null && nginx -t 2>/dev/null; then
+      systemctl reload nginx 2>/dev/null || warn "nginx reload 失败，请手动检查"
+    fi
+    restore_packaged_nginx_default_site
   fi
   rm -rf "$MANAGER_BASE" 2>/dev/null || true
   rm -f /etc/sysctl.d/99-landing-bbr.conf /etc/modprobe.d/99-landing-conntrack.conf 2>/dev/null || true
@@ -3412,8 +3442,11 @@ fresh_install(){
         validate_port "$_auto_ep" || die "无头模式 EXTRA_PORTS 含非法端口: $_auto_ep"
       done < <(extra_ports_lines "$EXTRA_PORTS")
     fi
-    if [[ -n "${LANDING_AUTO_PUBLIC_IP:-}" || -n "${FAKE_IP:-}" ]]; then
-      PUB_IP="${LANDING_AUTO_PUBLIC_IP:-${FAKE_IP}}"
+    if [[ -n "${FAKE_IP:-}" ]]; then
+      die "FAKE_IP 只允许用于 DNS-01 的外部 DNS 记录，不能写入中转导入 Token；请改用真实落地公网 IPv4: LANDING_AUTO_PUBLIC_IP"
+    fi
+    if [[ -n "${LANDING_AUTO_PUBLIC_IP:-}" ]]; then
+      PUB_IP="${LANDING_AUTO_PUBLIC_IP}"
       validate_ipv4 "$PUB_IP"
     else
 	      PUB_IP=""
@@ -3594,9 +3627,13 @@ fresh_install(){
       systemctl stop nginx 2>/dev/null || true
       systemctl disable nginx 2>/dev/null || true
     elif systemctl is-active --quiet nginx 2>/dev/null; then
-      nginx -t 2>/dev/null && { systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true; }
+      nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || warn "[rollback] nginx reload 失败，请手动检查"
+      restore_packaged_nginx_default_site
+    else
+      restore_packaged_nginx_default_site
     fi
-    rm -f "$NGINX_INSTALLED_FLAG" 2>/dev/null || true
+    systemctl reset-failed nginx 2>/dev/null || true
+    rm -f "$NGINX_INSTALLED_FLAG" "$NGINX_DEFAULT_SITE_DISABLED_FLAG" 2>/dev/null || true
     local _lines _n
     mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$FW_CHAIN" '$2==c {print $1}' | sort -rn)
     for _n in "${_lines[@]}"; do iptables -w 2 -D INPUT "$_n" 2>/dev/null || true; done
@@ -3839,7 +3876,9 @@ main(){
   _check_update >"$UPDATE_WARN_FILE" 2>&1 &
   UPDATE_CHECK_PID=$!
 
-  if [[ -f "$INSTALLED_FLAG" && -d "${MANAGER_BASE}/nodes" ]]; then
+  if [[ -f "$INSTALLED_FLAG" && -d "${MANAGER_BASE}/nodes" ]] \
+      && find "${MANAGER_BASE}/nodes" -maxdepth 1 -name "*.conf.deleting" -type f 2>/dev/null | grep -q .; then
+    _acquire_lock
     local _recovered_deleting=0 _del_file _base_conf
     while IFS= read -r _del_file; do
       [[ -f "$_del_file" ]] || continue
@@ -3860,6 +3899,7 @@ main(){
       setup_firewall  || die "恢复 .deleting 节点后同步防火墙失败，拒绝进入管理菜单"
       systemctl restart "$LANDING_SVC" 2>/dev/null || warn "恢复 .deleting 节点后服务重启失败，请检查: journalctl -u ${LANDING_SVC}"
     fi
+    _release_lock
   fi
 
   # [v2.9 Grok-A-🟠] Symmetric reconciliation: "flag absent but durable set complete" means
@@ -3878,7 +3918,9 @@ main(){
     [[ -z $(find "${MANAGER_BASE}/nodes" -name "*.conf" -not -name ".tmp-node-*.conf" -type f -maxdepth 1 2>/dev/null) ]] && _sym_node=0
     if (( _sym_mgr && _sym_conf && _sym_node )); then
       warn "[v2.9] 持久化集完整但安装标记缺失（崩溃于最后一步），自动恢复标记..."
+      _acquire_lock
       touch "$INSTALLED_FLAG"
+      _release_lock
       # fall through to the installed branch below
     fi
   fi
@@ -3922,6 +3964,7 @@ main(){
     if (( _svc_ok == 0 )); then
       warn "服务未运行，尝试自动恢复..."
       local _recovered=0
+      _acquire_lock
       if ( sync_xray_config ) 2>/dev/null && systemctl restart "$LANDING_SVC" 2>/dev/null; then
         sleep 2
         if systemctl is-active --quiet "$LANDING_SVC" 2>/dev/null; then
@@ -3929,6 +3972,7 @@ main(){
           _recovered=1
         fi
       fi
+      _release_lock
       if (( _recovered == 0 )); then
         error "自动恢复失败，拒绝进入管理菜单（防止在分裂状态上继续写操作）"
         echo -e "  请先执行: ${CYAN}bash $0 --status${NC} 排查状态分裂"
