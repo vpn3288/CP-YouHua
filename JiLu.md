@@ -1043,3 +1043,32 @@
   - 尚未使用已轮换的新 Cloudflare 最小权限 Token 跑完整 DNS-01 与节点连通测试。
 - Commit:
   - 待提交 `docs: add real machine test plan`
+
+## 2026-05-22 实机 SSH 指纹探测准备 - v6.15
+
+- 主笔：Codex/GPT-5.5
+- 审查者：本轮未新增脚本审查，仅按心跳推进测试准备。
+- 本轮目标：固化只读 SSH host key 指纹探测方式，避免后续手工临时命令误写 `known_hosts`。
+- 接受意见：
+  - Windows 自带 `ssh-keyscan` 与 Debian 12 默认 KEX 不兼容，WSL `ssh-keyscan` 可正常取回指纹；应将 WSL 只读探测方式写成可复用脚本。
+- 拒绝意见：
+  - 不接受自动执行 `ssh-keygen -R` 或关闭 host key 检查；指纹必须先和 VPS 控制台核对。
+- 修改文件：
+  - `tests/ssh_hostkey_probe.sh`
+  - `tests/real_machine_test_plan.md`
+  - `JiLu.md`
+- 真实改动：
+  - 新增 `tests/ssh_hostkey_probe.sh`，默认只读扫描中转机与落地机 SSH ED25519/RSA 公钥指纹，不写入任何信任文件。
+  - 实机测试清单补充 WSL 指纹探测命令。
+  - 不改两份安装脚本，不涨版本。
+- 验证：
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && bash tests/ssh_hostkey_probe.sh'`
+  - `bash tests/local_static_invariants.sh`
+  - `bash -n tests/ssh_hostkey_probe.sh`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+- 残留风险：
+  - 指纹已只读获取，但仍需和 VPS 控制台显示值核对后才能更新本机 `known_hosts` 并进入实机安装。
+- Commit:
+  - 待提交 `test: add ssh hostkey probe`
