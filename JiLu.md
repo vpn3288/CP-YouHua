@@ -1206,3 +1206,30 @@
   - 聊天中暴露过的 GitHub Token、Cloudflare Token 和服务器密码必须轮换；本轮未使用、未保存、未提交这些秘密。
 - Commit:
   - 待提交 `fix: harden dns placeholder and install rollback v6.18`
+
+## 2026-05-22 实机 SSH 指纹探测端口支持 - v6.18
+
+- 主笔：Codex/GPT-5.5
+- 审查者：本轮未新增脚本审查；主笔按安装测试前置门禁结果处理。
+- 本轮目标：修复只读 SSH host key 探测工具不接受 `IP:端口` 参数的问题。
+- 接受意见：
+  - 本地复现：`bash tests/ssh_hostkey_probe.sh 38.59.243.23:22 47.251.82.237:22` 会把 `IP:22` 当作非法 IPv4 跳过，无法按用户提供的端口格式进入实机前指纹核对。
+- 拒绝意见：
+  - 不使用服务器密码登录，不写入 `known_hosts`，不执行 `ssh-keygen -R`；当前只做无认证、只读指纹探测。
+- 修改文件：
+  - `tests/ssh_hostkey_probe.sh`
+  - `JiLu.md`
+- 真实改动：
+  - `tests/ssh_hostkey_probe.sh` 支持 `ip`、`ip:port`、`ip=SHA256:...`、`ip:port=SHA256:...` 四种参数形式。
+  - 调用 `ssh-keyscan` 时显式传入 `-p <port>`，输出也包含 `host:port`，便于和 VPS 控制台指纹核对。
+  - 不改安装脚本，不涨版本。
+- 验证：
+  - `bash -n tests/ssh_hostkey_probe.sh`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && bash tests/ssh_hostkey_probe.sh 38.59.243.23:22 47.251.82.237:22'`
+  - 中转机返回 RSA 指纹 `SHA256:2fbspFa+9p1pSa59Fk3dBXVVPJ3o6BRreOkxJDq0S9I` 与 ED25519 指纹 `SHA256:NGOwJ5XSCQrmi8q1t52jpLazEf93nrh60AIb0Vk2YRM`。
+  - 落地机返回 ED25519 指纹 `SHA256:BnKEU0UswmOUQAgrwW8Kh71hyV9OJwQMKZqyXnxA660` 与 RSA 指纹 `SHA256:RWf7koppDLeamN8W9hykZx0DqVXBoWEWwG/TGR9ckgA`。
+- 残留风险：
+  - 指纹仍需和 VPS 控制台显示值核对后，才能进行任何 SSH 信任写入或远程安装。
+  - 聊天中暴露的服务器密码和 Token 仍需轮换；本轮未使用、未保存、未提交这些秘密。
+- Commit:
+  - 9c01727 test: support ssh hostkey probe ports
