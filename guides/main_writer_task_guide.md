@@ -16,7 +16,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前已上传脚本事实：
 
-- 当前远端提交（本轮 v6.14 未推送前）: `fc65f6c fix: harden landing install rollback v6.11`
+- 当前远端提交: `69bd5b3 fix: harden landing install rollback v6.14`
 - 中转脚本当前文件名: `install_transit.sh`
 - 落地脚本当前文件名: `install_landing.sh`
 - 两脚本头部版本: `v6.14`

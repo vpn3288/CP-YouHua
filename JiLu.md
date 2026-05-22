@@ -860,7 +860,7 @@
 - 残留风险：
   - 当前落地机已被早期 v6.09/v6.10 测试安装过依赖，下一轮应优先重新 DD 或手工恢复干净状态后复测 v6.11 完整路径。
 - Commit:
-  - 本次三轮合并提交：待提交 `fix: harden landing install rollback v6.11`
+  - 已随第 24 轮合并提交：`69bd5b3 fix: harden landing install rollback v6.14`
 
 ## 2026-05-22 第 22 轮 - v6.12
 
@@ -896,7 +896,7 @@
 - 残留风险：
   - v6.12 尚未上传到实机复测；当前 Cloudflare Token 仍无 DNS 写权限，完整证书/节点连通测试继续阻塞。
 - Commit:
-  - 待第 24 轮真实优化合并提交。
+  - 已随第 24 轮合并提交：`69bd5b3 fix: harden landing install rollback v6.14`
 
 ## 2026-05-22 第 23 轮 - v6.13
 
@@ -929,7 +929,7 @@
 - 残留风险：
   - 当前 Cloudflare Token 仍无 DNS 写权限，完整证书/节点连通测试继续阻塞；落地机经历多轮失败测试后仍残留 `/etc/landing_manager/tmp/landing-manager.lock` 空锁文件，功能风险低，下一轮可通过重装系统复测干净路径。
 - Commit:
-  - 待第 24 轮真实优化合并提交。
+  - 已随第 24 轮合并提交：`69bd5b3 fix: harden landing install rollback v6.14`
 
 ## 2026-05-22 第 24 轮 - v6.14
 
@@ -974,4 +974,4 @@
   - 本轮已做静态验证，尚未重新 DD 两台 Debian 12 实机跑完整首装、DNS-01 成功、节点连通、中转导入、卸载重装循环。
   - 完整 DNS-01 成功路径需要一个已轮换且具备 `Zone:DNS:Edit + Zone:Zone:Read` 的测试 Token；聊天中暴露过的 GitHub/Cloudflare 密钥必须废弃并重新生成。
 - Commit:
-  - 待提交 `fix: harden landing install rollback v6.14`
+  - `69bd5b3 fix: harden landing install rollback v6.14`
