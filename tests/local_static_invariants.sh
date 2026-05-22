@@ -35,10 +35,13 @@ extractor_tmp="$(mktemp)"
 trap 'rm -f "$extractor_tmp"' EXIT
 {
   printf '%s\n' 'die(){ printf "%s\n" "$*" >&2; exit 1; }'
-  awk '/^extract_import_token_json_no_deps\(\)/{p=1} p{print} p && /^}/{exit}' install_transit.sh
+  printf '%s\n' 'trim(){ local s="$*"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf "%s" "$s"; }'
+  awk '/^normalize_import_token_no_deps\(\)/{p=1} p{print} p && /^extract_import_token_json_no_deps\(\)/{in_extract=1} in_extract && /^}/{exit}' install_transit.sh
 } >"$extractor_tmp"
 bash -c 'source "$1"; extract_import_token_json_no_deps "$2" | grep -q "\"dom\":\"example.com\""' _ "$extractor_tmp" "$valid_token" \
   || fail "valid import token pre-parse failed"
+bash -c 'source "$1"; extract_import_token_json_no_deps "$2" | grep -q "\"dom\":\"example.com\""' _ "$extractor_tmp" "bash install_transit.sh --import $valid_token" \
+  || fail "full import command token pre-parse failed"
 if bash -c 'source "$1"; extract_import_token_json_no_deps "$2" >/dev/null' _ "$extractor_tmp" 'eyJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' 2>/dev/null; then
   fail "invalid base64-like token passed pre-parse"
 fi

@@ -1233,3 +1233,39 @@
   - 聊天中暴露的服务器密码和 Token 仍需轮换；本轮未使用、未保存、未提交这些秘密。
 - Commit:
   - 9c01727 test: support ssh hostkey probe ports
+
+## 2026-05-22 第 29 轮 - v6.19
+
+- 主笔：Codex/GPT-5.5
+- 审查者：用户实机安装反馈；本轮未新增 WSL 审查窗口。
+- 本轮目标：修复中转机首次安装时粘贴完整落地机导入命令仍解析失败的问题。
+- 接受意见：
+  - 用户实机复现：中转机提示“请粘贴落地机输出的 Base64 Token 或完整导入命令”，但粘贴 `bash install_transit.sh --import <Token>` 后报 `[ERROR] 无法解析 Base64 token，请检查输入`。
+- 拒绝意见：
+  - 不接受要求用户只复制纯 Base64 Token 来绕过问题；提示已承诺支持完整导入命令，脚本必须按提示工作。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转脚本新增 `normalize_import_token_no_deps()`，优先从完整命令的 `--import` 后提取 Token，再回退识别纯 Base64 Token。
+  - 修复旧逻辑先删除空格导致 `--import eyJ...` 变成 `--importeyJ...`，并误把 `importeyJ...` 当作 Base64 的问题。
+  - 交互菜单的 Token 预校验改为复用同一套提取与语义校验逻辑，避免“预校验通过、真正导入失败”的分裂。
+  - 本地静态不变量新增完整导入命令解析用例。
+  - 两脚本版本统一提升到 `v6.19`；落地脚本只同步版本，业务逻辑不变。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash -n tests/local_static_invariants.sh`
+  - `bash -n tests/pre_real_machine_local_gate.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `bash tests/pre_real_machine_local_gate.sh`
+  - `git diff --check`
+- 残留风险：
+  - 本轮修复已本地复现并覆盖静态用例，但还需用户在中转机重新拉取最新版后再次粘贴完整导入命令验证。
+- Commit:
+  - 本提交 `fix: parse full transit import command v6.19`（最终 hash 以 `git log -1` 为准）

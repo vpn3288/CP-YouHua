@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.18.sh — 中转机安装脚本 v6.18
+# install_transit_v6.19.sh — 中转机安装脚本 v6.19
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.18: 同步落地 DNS 占位记录能力版本；中转业务逻辑不变。
+# v6.19: 修复交互菜单粘贴完整 --import 命令时误把 import 前缀当作 Base64 的问题。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.18"
+readonly VERSION="v6.19"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -1691,16 +1691,35 @@ PYGEN
   return 0
 }
 
-extract_import_token_json_no_deps(){
+normalize_import_token_no_deps(){
   local raw="$1"
   [[ -n "$raw" ]] || die "需要 token 参数"
-  raw=$(printf '%s' "$raw" | tr -d ' \n\r\t')
-  (( ${#raw} <= 2048 )) || die "token 过长（${#raw} 字节），拒绝解析"
+  raw=$(printf '%s' "$raw" | tr -d '\r\n\t')
+  (( ${#raw} <= 2048 )) || die "token 输入过长（${#raw} 字节），拒绝解析"
+
   local token=""
-  token=$(printf '%s' "$raw" | grep -Eo '(eyJ|eyA)[A-Za-z0-9+/=]{20,}|[A-Za-z0-9+/=]{40,}' | head -1 || true)
+  if [[ "$raw" == *"--import"* ]]; then
+    token="${raw#*--import}"
+    token=$(trim "$token")
+    token="${token%% *}"
+    token="${token#\'}"; token="${token%\'}"
+    token="${token#\"}"; token="${token%\"}"
+  fi
+  if [[ -z "$token" ]]; then
+    token=$(printf '%s' "$raw" | grep -Eo '(eyJ|eyA)[A-Za-z0-9+/=]{20,}' | head -1 || true)
+  fi
+  if [[ -z "$token" ]]; then
+    token=$(printf '%s' "$raw" | grep -Eo '[A-Za-z0-9+/=]{40,}' | head -1 || true)
+  fi
   if [[ -z "$token" ]]; then
     die "token 形态非法，请从落地机复制完整的 Base64 导入 token"
   fi
+  printf '%s' "$token"
+}
+
+extract_import_token_json_no_deps(){
+  local token=""
+  token=$(normalize_import_token_no_deps "$1")
   local pad_len=$(( (4 - ${#token} % 4) % 4 )) pad="" decoded=""
   if (( pad_len > 0 )); then
     printf -v pad '%*s' "$pad_len" ''
@@ -1782,7 +1801,6 @@ else:
 import_token(){
   local raw="$1"
   [[ -n "$raw" ]] || die "需要 token 参数"
-  raw=$(printf '%s' "$raw" | tr -d ' \n\r\t')
   local json=""
   json=$(extract_import_token_json_no_deps "$raw")
   check_deps
@@ -1956,20 +1974,7 @@ add_landing_route(){
       error "输入不能为空，请重新输入"
       continue
     fi
-    local extracted_token=""
-    extracted_token=$(printf '%s' "$INPUT_DATA" | python3 -c "
-import base64, json, re, sys
-raw = sys.stdin.read().strip()
-m = re.search(r'(?<![A-Za-z0-9+/=])(?:eyJ|eyA)[A-Za-z0-9+/=]{20,}(?![A-Za-z0-9+/=])', raw)
-if not m:
-    m = re.search(r'(?<![A-Za-z0-9+/=])[A-Za-z0-9+/=]{40,}(?![A-Za-z0-9+/=])', raw)
-if not m:
-    raise SystemExit(1)
-token = m.group(0)
-json.loads(base64.b64decode(token + '=' * (-len(token) % 4)).decode())
-print(token)
-" 2>/dev/null) || true
-    if [[ -n "$extracted_token" ]]; then
+    if extract_import_token_json_no_deps "$INPUT_DATA" >/dev/null 2>&1; then
       import_token "$INPUT_DATA"; _release_lock; return
     fi
     error "未识别到落地机 Token。请在落地机脚本输出中复制 Base64 Token 或完整导入命令。"
