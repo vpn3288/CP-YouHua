@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.22.sh — 中转机安装脚本 v6.22
+# install_transit_v6.24.sh — 中转机安装脚本 v6.24
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.22: 修复健康检查误判和防火墙蓝绿切换 swap 跳转残留清理。
+# v6.24: 健康检查补齐 .meta→.map 自愈，修复长期运行后路由记录文件缺失。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.22"
+readonly VERSION="v6.24"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -1076,6 +1076,91 @@ elif ! ss -H -tln 2>/dev/null | awk '$4=="127.0.0.1:9999"{ok=1} END{exit !ok}'; 
   logger -t transit-health "SNI黑洞监听缺失,尝试重启Nginx"
   systemctl restart nginx
 fi
+
+repair_transit_maps_from_meta(){
+  local conf_dir="/etc/transit_manager/conf"
+  local snippets_dir="/etc/nginx/stream-snippets"
+  [[ -d "$conf_dir" ]] || return 0
+  mkdir -p "$snippets_dir" || return 1
+  chmod 700 "$snippets_dir" 2>/dev/null || true
+
+  local meta domain ip port raw hash safe map key backend tmp snap had_map changed=0 failed=0 i
+  local -a changed_maps=() changed_snaps=() changed_had_maps=()
+  while IFS= read -r meta; do
+    [[ -f "$meta" ]] || continue
+    domain=$(awk -F= '/^DOMAIN=/{sub(/^[^=]*=/,"",$0); print; exit}' "$meta" 2>/dev/null || true)
+    ip=$(awk -F= '/^(TRANSIT_IP|IP)=/{print $2; exit}' "$meta" 2>/dev/null || true)
+    port=$(awk -F= '/^PORT=/{print $2; exit}' "$meta" 2>/dev/null || true)
+    [[ "$domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || { failed=1; continue; }
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { failed=1; continue; }
+    [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || { failed=1; continue; }
+    raw=$(printf '%s' "$domain" | tr '.' '_' | tr -cd 'a-zA-Z0-9_-')
+    hash=$(printf '%s' "$domain" | sha256sum | awk '{print substr($1,1,64)}')
+    safe="${raw:0:60}_${hash}"
+    map="${snippets_dir}/landing_${safe}.map"
+    key=$(printf '%s' "$domain" | tr -cd 'a-zA-Z0-9._-')
+    backend="$(printf '%s' "$ip" | tr -cd 'a-zA-Z0-9.'):${port}"
+
+    if [[ -f "$map" ]] && awk -v k="$key" -v b="$backend" '
+      /^[[:space:]]*($|#)/ { next }
+      {
+        field_count = NF
+        gsub(/;$/, "", $2)
+        if ($1 == k && $2 == b && field_count == 2) ok = 1
+        else bad = 1
+        count++
+      }
+      END { exit !(count == 1 && ok == 1 && bad == 0) }
+    ' "$map" 2>/dev/null; then
+      continue
+    fi
+
+    snap=""
+    had_map=0
+    if [[ -f "$map" ]]; then
+      had_map=1
+      snap=$(mktemp "${snippets_dir}/.transit-map-repair.XXXXXX") || { failed=1; continue; }
+      cp -f "$map" "$snap" || { rm -f "$snap" 2>/dev/null || true; failed=1; continue; }
+    fi
+    tmp=$(mktemp "${snippets_dir}/.transit-map-repair.XXXXXX") || { rm -f "$snap" 2>/dev/null || true; failed=1; continue; }
+    if ! printf '    %s    %s;\n' "$key" "$backend" > "$tmp"; then
+      rm -f "$tmp" "$snap" 2>/dev/null || true
+      failed=1
+      continue
+    fi
+    chmod 600 "$tmp" 2>/dev/null || true
+    if mv -f "$tmp" "$map"; then
+      chmod 600 "$map" 2>/dev/null || true
+      changed_maps+=("$map")
+      changed_snaps+=("$snap")
+      changed_had_maps+=("$had_map")
+      changed=1
+    else
+      rm -f "$tmp" "$snap" 2>/dev/null || true
+      failed=1
+    fi
+  done < <(find "$conf_dir" -maxdepth 1 -type f -name '*.meta' 2>/dev/null | sort)
+
+  if (( changed )); then
+    logger -t transit-health "检测到 .meta/.map 不一致，已尝试按 .meta 修复 .map"
+    if ! nginx -t >/dev/null 2>&1 || ! { systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null; }; then
+      for ((i=${#changed_maps[@]}-1; i>=0; i--)); do
+        if [[ "${changed_had_maps[$i]}" == "1" && -n "${changed_snaps[$i]}" && -f "${changed_snaps[$i]}" ]]; then
+          mv -f "${changed_snaps[$i]}" "${changed_maps[$i]}" 2>/dev/null || true
+        else
+          rm -f "${changed_maps[$i]}" 2>/dev/null || true
+        fi
+      done
+      rm -f "${changed_snaps[@]}" 2>/dev/null || true
+      logger -t transit-health ".map 自愈后 Nginx 校验或重载失败，已回滚本次修复"
+      return 1
+    fi
+    rm -f "${changed_snaps[@]}" 2>/dev/null || true
+  fi
+  (( failed == 0 ))
+}
+
+repair_transit_maps_from_meta || logger -t transit-health ".meta/.map 自愈未完全成功，请执行 install_transit.sh --status 检查"
 
 # 检查TCP 443规则
 if ! iptables -w 2 -S TRANSIT-MANAGER 2>/dev/null | grep -q -- "-p tcp .*--dport 443 .* -j ACCEPT"; then

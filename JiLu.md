@@ -1315,7 +1315,7 @@
   - 用户复测：v6.20 生成的 Trojan-TCP 节点仍不通。
   - 本地主机到中转机 `38.59.243.23:443` TCP 与 TLS/SNI 握手正常，能拿到落地域名证书，排除中转端口不可达。
   - 本地官方 Xray-core 26.3.27 + SOCKS 测试显示 Trojan 出站连接建立，但返回首包为 HTTP/2 SETTINGS 帧，说明请求被落地机主入口的 `h2` fallback 分流到了 VLESS-gRPC 入口，而不是 Trojan-TCP。
-  - 临时把落地机主入口 `h2` fallback 增加 `path="/3d8368e2-vg"` 后，本地 Xray Trojan 真实代理访问 `http://example.com/`、`https://api.ipify.org`、`https://www.cloudflare.com/cdn-cgi/trace` 全部成功，出口 IP 为落地机 `47.251.82.237`。
+  - 临时把落地机主入口 `h2` fallback 增加脱敏路径后，本地 Xray Trojan 真实代理访问 `http://example.com/`、`https://api.ipify.org`、`https://www.cloudflare.com/cdn-cgi/trace` 全部成功，出口 IP 为落地机 `47.251.82.237`。
 - 拒绝意见：
   - 不接受删除 gRPC 协议；gRPC 是当前 4 协议之一。正确修复是让 `h2` fallback 只匹配 gRPC serviceName path，其他 h2 客户端流量继续落入 Trojan catch-all。
 - 修改文件：
@@ -1383,3 +1383,74 @@
   - 本轮为现场巡检和静态验证，未重新 DD 全新安装；下一轮心跳继续观察中转机是否还出现周期性 `transit-health` 误报和 Nginx timeout。
 - Commit:
   - 待提交 `fix: clean firewall swap residue v6.22`
+
+## 2026-05-23 第 33 轮 - v6.23
+
+- 主笔：Codex/GPT-5.5
+- 审查者：心跳自动化实机巡检；主笔裁决。
+- 本轮目标：修复落地机防火墙开机恢复脚本中转白名单端口占位符未替换问题。
+- 接受意见：
+  - 心跳巡检运行落地机 `/etc/landing_manager/firewall-restore.sh` 发现退出码为 2，错误为 `invalid port/service '__LANDING_PORT__' specified`。
+  - 代码证据：`install_landing.sh` 在 `_transit_rules` 中先写入 `__LANDING_PORT__`，但 Python 模板替换顺序是先替换 `__LANDING_PORT__`，再插入 `__TRANSIT_RULES__`，导致持久化恢复脚本里的中转白名单端口占位符漏替换。
+- 拒绝意见：
+  - 不改运行时防火墙策略、不开放落地端口给全网；只修持久化脚本生成时的端口渲染顺序问题。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地 `_persist_iptables()` 生成 `_transit_rules` 时直接写入当前 `LANDING_PORT`，不再把 `__LANDING_PORT__` 留到模板插入后替换。
+  - 本地静态不变量新增检查，禁止 `_transit_rules` 中保留 late placeholder。
+  - 已在落地机现场把现有 `/etc/landing_manager/firewall-restore.sh` 的 `__LANDING_PORT__` 修正为当前端口 `8443`，并验证恢复脚本可执行。
+  - 两脚本版本统一提升到 `v6.23`；中转脚本仅同步版本，业务逻辑不变。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+  - 实机验证：中转防火墙恢复脚本执行成功且 swap 残留为 0；落地防火墙恢复脚本修正后执行成功且中转白名单仍为 `38.59.243.23/32:8443`。
+- 残留风险：
+  - 本轮未重新 DD 全新安装；下一轮心跳继续观察开机恢复脚本与健康检查是否保持无错误。
+- Commit:
+  - 待提交 `fix: render landing firewall port v6.23`
+
+## 2026-05-23 第 34 轮 - v6.24
+
+- 主笔：Codex/GPT-5.5
+- 审查者：心跳自动化实机巡检；主笔裁决。
+- 本轮目标：修复中转机长期运行后 `.meta/.map` 路由记录再次分裂的问题。
+- 接受意见：
+  - 实机巡检发现中转机 `/etc/transit_manager/conf` 中 `.meta:1`，但 `/etc/nginx/stream-snippets` 中有效 `.map:0`，`missing_map:1`，与用户反馈“几小时后被识别为文件丢失一个”一致。
+  - 代码证据：`install_transit.sh` 主入口与 `--status` 已有 `.meta`→`.map` 修复，但生成的 `/usr/local/bin/transit-health-check.sh` 未检查 `.meta/.map`，定时健康检查无法在长期运行中自动修复该状态分裂。
+- 拒绝意见：
+  - 不自动删除孤儿 `.meta` 或重导 Token；`.meta` 是订阅和路由真相源，误删风险高。
+  - 不改变中转架构、不安装代理核心、不新增协议；本轮只补齐已有自愈能力到健康检查。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转健康检查新增 `repair_transit_maps_from_meta()`，按 `.meta` 投影重建缺失或漂移的 `landing_*.map`。
+  - 自愈使用临时文件和快照；修复后必须 `nginx -t` 且 reload/restart 成功，否则回滚本次 `.map` 修复。
+  - 本地静态不变量新增检查，防止后续误删健康检查里的 `.meta/.map` 自愈逻辑。
+  - 已在中转机现场更新 `/usr/local/bin/transit-health-check.sh` 并运行一次，修复后 `.meta:1`、`.map:1`、`missing_map:0`，`nginx -t` 通过且 Nginx active。
+  - 两脚本版本统一提升到 `v6.24`；落地脚本仅同步版本，业务逻辑不变。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+  - 实机验证：中转机健康检查脚本语法通过，运行后 `.meta/.map` 一致；TCP 443 ACCEPT、UDP 443 DROP 均存在。
+  - 实机验证：落地机 `xray-landing.service` active；带 `XRAY_LOCATION_ASSET=/usr/local/share/xray-landing` 的 Xray 配置测试通过；证书剩余约 89 天；防火墙中转白名单存在。
+- 残留风险：
+  - 本轮未重新 DD 全新安装；继续通过小时巡检观察 `.meta/.map` 是否保持一致、证书续期 cron 是否持续无错误。
+- Commit:
+  - 待提交 `fix: repair transit route maps in health check v6.24`

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.22.sh — 落地机安装脚本 v6.22
+# install_landing_v6.24.sh — 落地机安装脚本 v6.24
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.22: 修复防火墙蓝绿切换 swap 跳转残留清理并纳入健康检查。
+# v6.24: 同步中转路由记录自愈修复版本；落地业务逻辑不变。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.22"
+readonly VERSION="v6.24"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -2240,7 +2240,7 @@ _persist_iptables(){
   local _tip
   for _tip in "${transit_ips[@]+${transit_ips[@]}}"; do
     [[ -n "$_tip" ]] || continue
-    _transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW -s ${_tip}/32 -p tcp --dport __LANDING_PORT__ -m comment --comment 'xray-landing-transit' -j ACCEPT"$'\n'
+    _transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW -s ${_tip}/32 -p tcp --dport ${LANDING_PORT} -m comment --comment 'xray-landing-transit' -j ACCEPT"$'\n'
   done
 
   # [v5.21-CRITICAL-2] 1Panel/Docker额外端口持久化
