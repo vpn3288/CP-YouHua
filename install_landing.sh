@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.08.sh — 落地机安装脚本 v6.08
+# install_landing_v6.11.sh — 落地机安装脚本 v6.11
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.08: 同步版本号；落地业务逻辑不变。
+# v6.11: 持久标记脚本安装的 Nginx，卸载时只停止自带 Nginx。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.08"
+readonly VERSION="v6.11"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -32,6 +32,7 @@ readonly MANAGER_BASE="/etc/landing_manager"
 readonly INSTALLED_FLAG="${MANAGER_BASE}/.installed"
 readonly MANAGER_CONFIG="${MANAGER_BASE}/manager.conf"
 readonly NGINX_CONF_ORIG="${MANAGER_BASE}/nginx.conf.orig"
+readonly NGINX_INSTALLED_FLAG="${MANAGER_BASE}/.nginx_installed_by_script"
 # BUG-6 FIX: ACME_HOME 不能 readonly，后续需要通过 env 传递给子进程
 # readonly 会导致部分 bash 版本对 "env ACME_HOME=..." 报 "readonly variable"
 ACME_HOME="${LANDING_BASE}/acme"
@@ -86,6 +87,7 @@ VLESS_WS_PORT=0
 TROJAN_TCP_PORT=0
 CF_TOKEN="${CF_TOKEN:-}"
 CREATED_USER="0"
+NGINX_INSTALLED_BY_SCRIPT="0"
 
 trim(){
   local s=${1-}
@@ -141,9 +143,10 @@ _has_openresty_tengine(){
 }
 
 ensure_cron_service(){
-  local _cron_unit=""
-  systemctl list-unit-files crond.service 2>/dev/null | grep -q '^crond\.service' && _cron_unit="crond"
-  systemctl list-unit-files cron.service 2>/dev/null | grep -q '^cron\.service' && _cron_unit="${_cron_unit:-cron}"
+  local _cron_unit="" _unit_files=""
+  _unit_files=$(systemctl list-unit-files crond.service cron.service 2>/dev/null || true)
+  [[ "$_unit_files" =~ (^|[[:space:]])crond\.service[[:space:]] ]] && _cron_unit="crond"
+  [[ "$_unit_files" =~ (^|[[:space:]])cron\.service[[:space:]] ]] && _cron_unit="${_cron_unit:-cron}"
   [[ -n "$_cron_unit" ]] || die "未找到 cron/crond systemd unit，证书续期链路不可用"
   systemctl enable --now "$_cron_unit" 2>/dev/null || die "${_cron_unit} 启动失败，证书续期链路不可用"
 }
@@ -357,25 +360,53 @@ detect_ssh_port(){
 }
 
 validate_domain(){
-  local d
+  local d label tld
+  local -a _domain_labels
   d="$(trim "$1")"
   (( ${#d} >= 4 && ${#d} <= 253 )) || { error "域名长度非法 (${#d}): $d"; return 1; }
   [[ "$d" == *".."* ]] && { error "域名不能包含连续的点: $d"; return 1; }
   [[ "$d" == *"."* ]] || { error "域名必须包含至少一个点: $d"; return 1; }
-  printf '%s' "$d" | python3 -c "import sys,re; d=sys.stdin.read().strip(); pat=re.compile(r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(?:\.(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?))*\.[a-zA-Z0-9]{2,}$'); sys.exit(0 if pat.match(d) else 1)" >/dev/null 2>&1 || { error "域名格式非法: $d"; return 1; }
+  IFS='.' read -r -a _domain_labels <<< "$d"
+  tld="${_domain_labels[-1]}"
+  [[ "$tld" =~ ^[A-Za-z0-9]{2,}$ ]] || { error "域名 TLD 格式非法: $d"; return 1; }
+  for label in "${_domain_labels[@]}"; do
+    (( ${#label} >= 1 && ${#label} <= 63 )) || { error "域名标签长度非法: $label"; return 1; }
+    [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || { error "域名格式非法: $d"; return 1; }
+  done
 }
 
 validate_ipv4(){
-  local ip="$1"
-  printf '%s' "$ip" | python3 -c "import ipaddress, sys
-ip = sys.stdin.read().strip()
-try:
-    addr = ipaddress.IPv4Address(ip)
-    if addr.is_loopback or addr.is_unspecified or addr.is_reserved or addr.is_multicast or addr.is_link_local or addr.is_private:
-        raise SystemExit(1)
-except ValueError:
-    raise SystemExit(1)
-" >/dev/null 2>&1 || { error "IPv4 格式非法: $ip"; return 1; }
+  local ip="$1" a b c d part
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { error "IPv4 格式非法: $ip"; return 1; }
+  IFS='.' read -r a b c d <<< "$ip"
+  for part in "$a" "$b" "$c" "$d"; do
+    [[ "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] || { error "IPv4 格式非法: $ip"; return 1; }
+    (( 10#$part >= 0 && 10#$part <= 255 )) || { error "IPv4 格式非法: $ip"; return 1; }
+  done
+  if (( a == 0 || a == 10 || a == 127 || a >= 224 )); then
+    error "IPv4 必须是公网地址: $ip"; return 1
+  fi
+  if (( a == 100 && b >= 64 && b <= 127 )); then
+    error "IPv4 不能是运营商 NAT 地址: $ip"; return 1
+  fi
+  if (( a == 169 && b == 254 )); then
+    error "IPv4 不能是链路本地地址: $ip"; return 1
+  fi
+  if (( a == 172 && b >= 16 && b <= 31 )); then
+    error "IPv4 不能是私网地址: $ip"; return 1
+  fi
+  if (( a == 192 && b == 168 )); then
+    error "IPv4 不能是私网地址: $ip"; return 1
+  fi
+  if (( a == 192 && ((b == 0 && (c == 0 || c == 2)) || (b == 88 && c == 99)) )); then
+    error "IPv4 不能是保留地址: $ip"; return 1
+  fi
+  if (( a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100)) )); then
+    error "IPv4 不能是保留地址: $ip"; return 1
+  fi
+  if (( a == 203 && b == 0 && c == 113 )); then
+    error "IPv4 不能是保留地址: $ip"; return 1
+  fi
 }
 
 validate_port(){
@@ -525,10 +556,20 @@ check_deps(){
     apt-get update -qq 2>/dev/null || true
     for d in "${missing[@]}"; do
       apt-get install -y "$d" 2>/dev/null || die "安装 $d 失败"
+      if [[ "$d" == "nginx" ]]; then
+        NGINX_INSTALLED_BY_SCRIPT="1"
+        mkdir -p "$MANAGER_BASE" 2>/dev/null || true
+        touch "$NGINX_INSTALLED_FLAG" 2>/dev/null || true
+      fi
     done
   elif (( ${#missing[@]} > 0 )); then
     for d in "${missing[@]}"; do
       yum install -y "$d" 2>/dev/null || dnf install -y "$d" 2>/dev/null || die "无法安装 $d"
+      if [[ "$d" == "nginx" ]]; then
+        NGINX_INSTALLED_BY_SCRIPT="1"
+        mkdir -p "$MANAGER_BASE" 2>/dev/null || true
+        touch "$NGINX_INSTALLED_FLAG" 2>/dev/null || true
+      fi
     done
   fi
   for bp in "${_bin_pkg[@]}"; do
@@ -846,6 +887,9 @@ setup_fallback_decoy(){
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq 2>/dev/null || true
     apt-get install -y nginx 2>/dev/null || die "Nginx 安装失败"
+    NGINX_INSTALLED_BY_SCRIPT="1"
+    mkdir -p "$MANAGER_BASE" 2>/dev/null || true
+    touch "$NGINX_INSTALLED_FLAG" 2>/dev/null || true
   fi
   _tune_nginx_worker_connections
   atomic_write "$fallback_conf" 644 root:root <<'FDEOF'
@@ -3101,6 +3145,8 @@ purge_all(){
   else
     info "检测到 UNINSTALL_CONFIRM 环境变量，跳过交互确认"
   fi
+  local _nginx_installed_by_script=0
+  [[ -f "$NGINX_INSTALLED_FLAG" ]] && _nginx_installed_by_script=1
 
   # [F6] Unregister acme.sh cron FIRST — before stopping the service or removing any files.
   # If interrupted after service stop but before cronjob removal, cron keeps firing reloadcmd
@@ -3205,7 +3251,10 @@ purge_all(){
   else
     sed -i "/# xray-landing-tuning-v${VERSION}/d" /etc/nginx/nginx.conf 2>/dev/null || true
   fi
-  if nginx -t 2>/dev/null; then
+  if (( _nginx_installed_by_script )); then
+    systemctl stop nginx 2>/dev/null || true
+    systemctl disable nginx 2>/dev/null || true
+  elif nginx -t 2>/dev/null; then
     systemctl reload nginx 2>/dev/null || true
   fi
   rm -rf "$MANAGER_BASE" 2>/dev/null || true
@@ -3332,7 +3381,6 @@ fresh_install(){
   echo ""
   local _headless=0
   local _fresh_lock_acquired=0
-  check_deps
   # [v5.26 BUG-26] 支持简化环境变量命名（DOMAIN/CF_TOKEN/TRANSIT_IP），向后兼容LANDING_AUTO_*
   if [[ -n "${LANDING_HEADLESS:-}" || -n "${LANDING_AUTO_DOMAIN:-}" || -n "${DOMAIN:-}" ]]; then
     _headless=1
@@ -3477,6 +3525,8 @@ fresh_install(){
   fi
   [[ "$CONFIRM" =~ ^[Yy]$ ]] || { info "已取消"; exit 0; }
 
+  check_deps
+
   ss -tlnp 2>/dev/null | grep -qE ":${LANDING_PORT}\b" && die "端口 ${LANDING_PORT} 已被占用（请先检查 nginx / xray* / mack-a*）"
 
   # [v5.18-L-CRITICAL-1] 检查已启用但未运行的服务（重启后冲突）
@@ -3535,7 +3585,18 @@ fresh_install(){
     # configured and enters inconsistent state thinking setup_fallback_decoy already ran.
     rm -f "/etc/nginx/conf.d/xray-landing-fallback.conf" 2>/dev/null || true
     rm -f "/etc/systemd/system/nginx.service.d/landing-override.conf" 2>/dev/null || true
+    if [[ -f "$NGINX_CONF_ORIG" ]]; then
+      cp -a "$NGINX_CONF_ORIG" /etc/nginx/nginx.conf 2>/dev/null || warn "[rollback] nginx.conf 恢复失败，请手动检查"
+      rm -f "$NGINX_CONF_ORIG" 2>/dev/null || true
+    fi
     systemctl daemon-reload 2>/dev/null || true
+    if [[ "${NGINX_INSTALLED_BY_SCRIPT:-0}" == "1" || -f "$NGINX_INSTALLED_FLAG" ]]; then
+      systemctl stop nginx 2>/dev/null || true
+      systemctl disable nginx 2>/dev/null || true
+    elif systemctl is-active --quiet nginx 2>/dev/null; then
+      nginx -t 2>/dev/null && { systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true; }
+    fi
+    rm -f "$NGINX_INSTALLED_FLAG" 2>/dev/null || true
     local _lines _n
     mapfile -t _lines < <(iptables -w 2 -L INPUT --line-numbers -n 2>/dev/null | awk -v c="$FW_CHAIN" '$2==c {print $1}' | sort -rn)
     for _n in "${_lines[@]}"; do iptables -w 2 -D INPUT "$_n" 2>/dev/null || true; done

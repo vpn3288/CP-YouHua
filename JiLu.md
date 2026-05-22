@@ -752,3 +752,112 @@
   - 已做静态验证，未做 Debian 12 中转机实机 marker-only nginx.conf 故障注入、删除路由 Ctrl-C 注入、真实 Nginx reload 失败注入或长时间运行验证。
 - Commit:
   - 本次三轮合并提交：`fix: harden transit route recovery v6.08`
+
+## 2026-05-22 第 19 轮 - v6.09
+
+- 主笔：Codex/GPT-5.5
+- 审查者：实机安装测试反馈；主笔本地裁决
+- 本轮目标：进入 Debian 12 实机安装测试，优先修复落地机真人输入测试中暴露的安装流程问题。
+- 接受意见：
+  - 实机测试 P1：落地脚本在用户输入域名、Token、端口和最终确认前执行 `check_deps()`，干净 Debian 12 上会先安装依赖；用户输错或取消时系统已经被修改，不符合小白安装和可恢复要求。
+  - 实机测试 P1：`ensure_cron_service()` 在 `set -o pipefail` 下使用 `systemctl ... | grep -q`，`grep -q` 提前退出可能让上游 `systemctl` 收到 SIGPIPE，导致已经存在的 `cron.service` 被误判为缺失。
+  - 实机测试 P2：落地输入校验依赖 `python3`，如果把依赖安装推迟到确认后，域名和中转公网 IPv4 校验必须具备 Bash 自包含路径。
+- 拒绝意见：
+  - 不接受把 DNS “虚假 IP”写入 `LANDING_AUTO_PUBLIC_IP` 或 `FAKE_IP`：该字段会进入中转导入 Token，必须是真实可达的落地公网 IPv4；DNS-01 的 A 记录可指向非落地 IP，但 Token 里的 `ip` 不能伪造。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地 `ensure_cron_service()` 改为先捕获 `systemctl list-unit-files` 输出，再用 Bash 正则判断 `cron.service`/`crond.service`，避开 `pipefail + grep -q` 的 SIGPIPE 误判。
+  - 落地 `fresh_install()` 将 `check_deps()` 从输入前移动到最终确认后，取消安装或输入错误不再提前安装依赖。
+  - 落地 `validate_domain()` 改为 Bash 标签级校验，不再依赖安装前的 `python3`。
+  - 落地 `validate_ipv4()` 改为 Bash 公网 IPv4 校验，继续拒绝私网、CGNAT、链路本地、组播和常见保留地址。
+  - 两脚本版本统一提升到 `v6.09`；中转脚本仅同步版本号，中转业务逻辑不变。
+  - README 和两份指南同步当前 v6.09 事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - 实机只读检查：中转机 `38.59.243.23` 和落地机 `47.251.82.237` 均为 Debian 12，初始仅 SSH 监听。
+  - 实机复现：落地 v6.08 在输入提示前执行依赖安装，并在 `cron.service` 存在时仍报“未找到 cron/crond systemd unit”。
+  - Cloudflare API 验证：当前提供的 Token 可读取 Zone，但创建 DNS A 记录返回 403，说明 DNS-01 正式安装会因权限不足失败；未记录 Token 明文。
+- 残留风险：
+  - 本轮已修复本地脚本，尚未把 v6.09 重新上传到实机复测；未完成落地证书申请、Xray 启动、中转导入 Token、节点连通和重装循环。
+- Commit:
+  - 待第 21 轮真实优化合并提交。
+
+## 2026-05-22 第 20 轮 - v6.10
+
+- 主笔：Codex/GPT-5.5
+- 审查者：实机安装失败回滚检查；主笔本地裁决
+- 本轮目标：继续落地机实机 headless 安装路径测试，修复证书失败后 Nginx fallback 残留占用 80 的半状态。
+- 接受意见：
+  - 实机测试 P1：Cloudflare DNS-01 TXT 写入失败后，`_fresh_install_rollback()` 清理了 Xray 和防火墙，但未恢复/停止安装过程中带起的 Nginx fallback；失败后仍监听 `0.0.0.0:80` 和 `127.0.0.1:45231/45232`。
+  - 实机测试 P1：干净落地机使用 DNS-01，不应在证书失败后遗留 80 端口监听；这会破坏“失败可重跑”和“不占用 80”的安装契约。
+- 拒绝意见：
+  - 不接受无条件停止宿主机 Nginx：如果用户原本已有 Nginx/OpenResty/Tengine 或 1Panel，回滚不应误停用户服务。只对脚本本轮安装的 Nginx 执行 stop/disable；已有 Nginx 仅移除本脚本 fallback 后 reload/restart。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 新增 `NGINX_INSTALLED_BY_SCRIPT` 运行期标记；`check_deps()` 或 `setup_fallback_decoy()` 安装 nginx 时置位。
+  - `_fresh_install_rollback()` 删除 fallback 配置和 nginx systemd drop-in 后，会恢复 `nginx.conf.orig` 到 `/etc/nginx/nginx.conf`。
+  - 如果 nginx 是本轮脚本安装的，回滚会 stop/disable nginx，避免证书失败后仍占用 80；如果 nginx 原本存在，则仅验证并 reload/restart。
+  - 两脚本版本统一提升到 `v6.10`；中转脚本仅同步版本号，中转业务逻辑不变。
+  - README 和两份指南同步当前 v6.10 事实。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - 实机复现：v6.09 headless 安装在 DNS-01 TXT 写入失败后回滚，但 Nginx 仍监听 `0.0.0.0:80` 与本地 fallback 端口。
+- 残留风险：
+  - v6.10 尚未上传到实机复测；由于当前落地机已被 v6.09 失败路径污染，需要先手动清理 Nginx fallback 残留或重装系统后再验证完整干净路径。
+- Commit:
+  - 待第 21 轮真实优化合并提交。
+
+## 2026-05-22 第 21 轮 - v6.11
+
+- 主笔：Codex/GPT-5.5
+- 审查者：实机卸载残留检查；主笔本地裁决
+- 本轮目标：补齐第 20 轮回滚修复的卸载路径，避免失败安装后执行 `--uninstall` 仍留下脚本安装的 Nginx 监听 80。
+- 接受意见：
+  - 实机测试 P1：在 v6.09 证书失败残留状态下运行 v6.10 `--uninstall`，脚本删除了用户和管理目录，但 Nginx 仍 active 并监听 `0.0.0.0:80`；干净落地机卸载后不应留下这个业务无关监听。
+  - 实机测试 P2：只用运行期变量记录 Nginx 是否由脚本安装不够；失败后用户可能另起一轮 `--uninstall`，需要持久标记辅助清理。
+- 拒绝意见：
+  - 不接受无条件停止所有 Nginx：若宿主机原本有 Nginx/OpenResty/Tengine 或 1Panel，卸载只能移除本脚本 fallback 并 reload，不能误停用户业务。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 新增 `NGINX_INSTALLED_FLAG=/etc/landing_manager/.nginx_installed_by_script`。
+  - `check_deps()` 和 `setup_fallback_decoy()` 只要由脚本安装 nginx，就写入持久标记并设置运行期变量。
+  - fresh install 回滚同时识别运行期变量和持久标记；确认 nginx 属于本脚本安装时 stop/disable，否则只 reload/restart。
+  - `purge_all()` 在删除管理目录前读取持久标记；卸载时只停止脚本安装的 nginx，避免误停用户原有 Nginx。
+  - 两脚本版本统一提升到 `v6.11`；中转脚本仅同步版本号，中转业务逻辑不变。
+  - README 和两份指南同步当前 v6.11 事实。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - 实机复现：v6.10 `--uninstall` 后落地机仍有 nginx active 和 80 监听，确认需要持久标记区分脚本安装的 nginx。
+- 残留风险：
+  - 当前落地机已被早期 v6.09/v6.10 测试安装过依赖，下一轮应优先重新 DD 或手工恢复干净状态后复测 v6.11 完整路径。
+- Commit:
+  - 本次三轮合并提交：待提交 `fix: harden landing install rollback v6.11`
