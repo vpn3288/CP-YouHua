@@ -72,13 +72,13 @@
 
 ## 3. 当前脚本事实
 
-审查者每轮必须重新读取脚本，以下事实只描述当前 v6.02 脚本。
+审查者每轮必须重新读取脚本，以下事实只描述当前 v6.05 脚本。
 
 ### 3.1 中转脚本
 
 当前头部：
 
-- `install_transit_v6.02.sh`
+- `install_transit_v6.05.sh`
 - CN2 GIA 纯 IPv4 中转机。
 - Nginx stream SNI 盲传。
 - 禁止代理核心和 IPv6 业务路径。
@@ -90,7 +90,7 @@
 - `detect_ssh_port()` 防止误封 SSH。
 - `validate_ip()` 拒绝 IPv6。
 - `_meta_drift_detect()` 检测 `.meta/.map` 漂移。
-- `_cleanup_orphan_meta()` 与 `_cleanup_orphan_maps()`。
+- `_repair_maps_from_meta()` 用 `.meta` 修复缺失/漂移 `.map`，要求 `.map` 精确等于 `.meta` 投影出来的单条路由；snippets 目录丢失时可重建；修复后 Nginx reload 失败会回滚并尝试恢复旧运行态；孤儿记录文件不得自动删除。
 - `_stream_conf_valid()` 检测 stream 配置漂移。
 - `ensure_fallback_blackhole()` 维护本地 SNI 黑洞。
 - `init_nginx_stream()` 写入 Nginx stream。
@@ -116,7 +116,7 @@
 
 当前头部：
 
-- `install_landing_v6.02.sh`
+- `install_landing_v6.05.sh`
 - 美国 IPv4 落地机。
 - Xray-core 4 协议单端口回落。
 - Cloudflare DNS-01 证书。

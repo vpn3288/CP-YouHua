@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.02.sh — 中转机安装脚本 v6.02
+# install_transit_v6.05.sh — 中转机安装脚本 v6.05
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.02: 防火墙持久化失败显式返回，由调用者统一回滚。
+# v6.05: .map 必须精确等于 .meta 投影，防隐藏 SNI 路由残留。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.02"
+readonly VERSION="v6.05"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -271,22 +271,42 @@ nginx_ip_str()    { printf '%s' "$1" | tr -cd 'a-zA-Z0-9.'; }
 # [F2] Compatibility reader: accepts both old IP= and new TRANSIT_IP= field names in .meta files.
 # Old files written before v2.3 used IP=; new files use TRANSIT_IP=.
 read_meta_ip()    { awk -F= '/^(TRANSIT_IP|IP)=/{print $2; exit}' "$1"; }
+_map_matches_meta_projection(){
+  local _map="$1" _domain="$2" _ip="$3" _port="$4" _key _backend
+  [[ -f "$_map" ]] || return 1
+  _key=$(nginx_domain_str "$_domain")
+  _backend="$(nginx_ip_str "$_ip"):${_port}"
+  [[ -n "$_key" && -n "$_backend" ]] || return 1
+  awk -v k="$_key" -v b="$_backend" '
+    /^[[:space:]]*($|#)/ { next }
+    {
+      field_count = NF
+      gsub(/;$/, "", $2)
+      if ($1 == k && $2 == b && field_count == 2) {
+        ok = 1
+      } else {
+        bad = 1
+      }
+      count++
+    }
+    END { exit !(count == 1 && ok == 1 && bad == 0) }
+  ' "$_map" 2>/dev/null
+}
 _meta_drift_detect(){
   [[ -d "$SNIPPETS_DIR" && -d "$CONF_DIR" ]] || return 1
-  local _mf _mdom _mip _mport _msafe _map _map_backend _safe _bad=0
+  local _mf _mdom _mip _mport _msafe _map _safe _bad=0
   while IFS= read -r _mf; do
     [[ -f "$_mf" ]] || continue
     _mdom=$(grep '^DOMAIN=' "$_mf" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
     _mip=$(read_meta_ip "$_mf" 2>/dev/null || true)
     _mport=$(grep '^PORT=' "$_mf" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
     [[ -n "$_mdom" && -n "$_mip" && -n "$_mport" ]] || { _bad=1; break; }
+    validate_domain "$_mdom" 2>/dev/null || { _bad=1; break; }
     validate_ipv4 "$_mip" 2>/dev/null || { _bad=1; break; }
     validate_port "$_mport" 2>/dev/null || { _bad=1; break; }
     _msafe=$(domain_to_safe "$_mdom")
     _map="${SNIPPETS_DIR}/landing_${_msafe}.map"
-    [[ -f "$_map" ]] || { _bad=1; break; }
-    _map_backend=$(awk -v d="$(nginx_domain_str "$_mdom")" '$1 == d {gsub(/;$/, "", $2); print $2; exit}' "$_map" 2>/dev/null || true)
-    [[ "$_map_backend" == "$(nginx_ip_str "$_mip"):${_mport}" ]] || { _bad=1; break; }
+    _map_matches_meta_projection "$_map" "$_mdom" "$_mip" "$_mport" || { _bad=1; break; }
   done < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*.meta' 2>/dev/null | sort)
   while IFS= read -r _map; do
     [[ -f "$_map" ]] || continue
@@ -298,52 +318,71 @@ _meta_drift_detect(){
   return $_bad
 }
 
-_cleanup_orphan_meta(){
-  [[ -d "$SNIPPETS_DIR" && -d "$CONF_DIR" ]] || return 1
-  local _mf _mdom _msafe _map _cleaned=0 _failed=0
+_repair_maps_from_meta(){
+  [[ -d "$CONF_DIR" ]] || return 1
+  mkdir -p "$SNIPPETS_DIR" || { warn "创建 snippets 目录失败: $SNIPPETS_DIR"; return 1; }
+  chmod 700 "$SNIPPETS_DIR" 2>/dev/null || true
+  local _mf _mdom _mip _mport _msafe _map _tmp _snap _had_map _changed=0 _failed=0
+  local -a _changed_maps=() _changed_snaps=() _changed_had_maps=()
   while IFS= read -r _mf; do
     [[ -f "$_mf" ]] || continue
     _mdom=$(grep '^DOMAIN=' "$_mf" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
-    [[ -n "$_mdom" ]] || continue
+    _mip=$(read_meta_ip "$_mf" 2>/dev/null || true)
+    _mport=$(grep '^PORT=' "$_mf" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
+    [[ -n "$_mdom" && -n "$_mip" && -n "$_mport" ]] || { warn "跳过损坏 .meta，字段不完整: $_mf"; _failed=1; continue; }
+    validate_domain "$_mdom" 2>/dev/null || { warn "跳过损坏 .meta，域名非法: $_mf"; _failed=1; continue; }
+    validate_ipv4 "$_mip" 2>/dev/null || { warn "跳过损坏 .meta，IPv4 非法: $_mf"; _failed=1; continue; }
+    validate_port "$_mport" 2>/dev/null || { warn "跳过损坏 .meta，端口非法: $_mf"; _failed=1; continue; }
     _msafe=$(domain_to_safe "$_mdom")
     _map="${SNIPPETS_DIR}/landing_${_msafe}.map"
-    if [[ ! -f "$_map" ]]; then
-      warn "清理孤儿 .meta: $_mf（缺少对应 .map）"
-      if rm -f "$_mf"; then
-        _cleaned=1
-      else
-        warn "孤儿 .meta 删除失败: $_mf"
-        _failed=1
-      fi
+    _map_matches_meta_projection "$_map" "$_mdom" "$_mip" "$_mport" && continue
+    warn "根据 .meta 修复 .map: ${_mdom} -> ${_mip}:${_mport}"
+    _snap=""
+    _had_map=0
+    if [[ -f "$_map" ]]; then
+      _had_map=1
+      _snap=$(mktemp "${SNIPPETS_DIR}/.snap-recover.XXXXXX") || { warn "mktemp 修复快照失败: $_map"; _failed=1; continue; }
+      cp -f "$_map" "$_snap" || { rm -f "$_snap" 2>/dev/null || true; warn "复制修复快照失败: $_map"; _failed=1; continue; }
+    fi
+    _tmp=$(mktemp "${SNIPPETS_DIR}/.snap-recover.XXXXXX") || { warn "mktemp 修复 .map 失败: $_map"; _failed=1; continue; }
+    printf '    %s    %s:%s;\n' "$(nginx_domain_str "$_mdom")" "$(nginx_ip_str "$_mip")" "$_mport" > "$_tmp" \
+      || { rm -f "$_tmp" "$_snap" 2>/dev/null || true; warn "写入临时 .map 失败: $_map"; _failed=1; continue; }
+    chmod 600 "$_tmp" 2>/dev/null || true
+    if mv -f "$_tmp" "$_map"; then
+      chmod 600 "$_map" 2>/dev/null || true
+      _changed_maps+=("$_map")
+      _changed_snaps+=("$_snap")
+      _changed_had_maps+=("$_had_map")
+      _changed=1
+    else
+      rm -f "$_tmp" "$_snap" 2>/dev/null || true
+      warn "提交修复 .map 失败: $_map"
+      _failed=1
     fi
   done < <(find "$CONF_DIR" -maxdepth 1 -type f -name '*.meta' 2>/dev/null | sort)
-  (( _failed == 0 && _cleaned == 1 ))
-}
-
-_cleanup_orphan_maps(){
-  [[ -d "$SNIPPETS_DIR" && -d "$CONF_DIR" ]] || return 1
-  local _map _safe _cleaned=0 _failed=0
-  while IFS= read -r _map; do
-    [[ -f "$_map" ]] || continue
-    _safe=$(basename "$_map")
-    _safe="${_safe#landing_}"
-    _safe="${_safe%.map}"
-    if [[ ! -f "${CONF_DIR}/${_safe}.meta" ]]; then
-      warn "清理孤儿 .map: $_map（缺少对应 .meta）"
-      if rm -f "$_map"; then
-        _cleaned=1
+  if (( _changed )); then
+    if ! nginx_reload >/dev/null 2>&1; then
+      local _i
+      for ((_i=${#_changed_maps[@]}-1; _i>=0; _i--)); do
+        if [[ "${_changed_had_maps[$_i]}" == "1" && -n "${_changed_snaps[$_i]}" && -f "${_changed_snaps[$_i]}" ]]; then
+          mv -f "${_changed_snaps[$_i]}" "${_changed_maps[$_i]}" 2>/dev/null || true
+        else
+          rm -f "${_changed_maps[$_i]}" 2>/dev/null || true
+        fi
+      done
+      rm -f "${_changed_snaps[@]}" 2>/dev/null || true
+      if nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null \
+          || warn ".map 修复回滚后 Nginx 旧运行态 reload/restart 失败，请手动检查"
       else
-        warn "孤儿 .map 删除失败: $_map"
-        _failed=1
+        warn ".map 修复回滚后 Nginx 配置仍无法通过校验，请手动检查"
       fi
+      warn ".map 已从 .meta 修复但 Nginx reload 失败，本次修复已回滚"
+      return 1
     fi
-  done < <(find "$SNIPPETS_DIR" -maxdepth 1 -type f -name 'landing_*.map' ! -name '*dummy*' 2>/dev/null | sort)
-  if (( _failed == 0 && _cleaned == 1 )); then
-    nginx_reload >/dev/null 2>&1 || { warn "孤儿 .map 已删除但 Nginx reload 失败"; return 1; }
-    return 0
+    rm -f "${_changed_snaps[@]}" 2>/dev/null || true
   fi
-  (( _failed == 0 && _cleaned == 0 )) && return 1
-  return 1
+  (( _failed == 0 && _changed == 1 ))
 }
 
 _stream_conf_valid(){
@@ -1953,7 +1992,7 @@ show_status(){
   # [v5.70 BUG-30] 添加 meta/map 一致性检查（与 main 函数启动检查保持一致）
   if ! _meta_drift_detect 2>/dev/null; then
     echo -e "  ${RED}meta/map 一致性: ✗ .meta 与 .map 不一致${NC}"; _ok=0
-    echo -e "  ${CYAN}  修复: bash $0 --import <token> 重新导入落地机配置${NC}"
+    echo -e "  ${CYAN}  修复: bash $0 触发自动修复；仍失败再用 --import <token> 重新导入${NC}"
   else
     echo -e "  meta/map 一致性: ${GREEN}✓${NC}"
   fi
@@ -2297,12 +2336,26 @@ main(){
   UPDATE_CHECK_PID=$!
   if [[ ! -f "$INSTALLED_FLAG" ]]; then
     local _durable_transit=0
+    local _durable_transit_blocked=0
     if grep -q "$STREAM_INCLUDE_MARKER" "$NGINX_MAIN_CONF" 2>/dev/null &&        find "$CONF_DIR" -maxdepth 1 -type f -name "*.meta" 2>/dev/null | grep -q .; then
       if ! _meta_drift_detect; then
-        warn "[reconcile] durable set has meta/map drift — leaving .installed absent"
+        warn "[reconcile] durable set has meta/map drift — attempting .map repair before reinstall"
+        _acquire_lock
+        if _repair_maps_from_meta 2>/dev/null && _meta_drift_detect 2>/dev/null; then
+          _durable_transit=1
+        else
+          _durable_transit_blocked=1
+        fi
+        _release_lock
       else
         _durable_transit=1
       fi
+    fi
+    if (( _durable_transit_blocked )); then
+      error "[reconcile] stream include 与 .meta 存在但 meta/map 仍不一致，拒绝进入全新安装以避免覆盖现有记录"
+      echo -e "  请先执行: ${CYAN}bash $0 --status${NC} 排查"
+      echo -e "  若确认需要重导，请执行: ${CYAN}bash $0 --import <token>${NC}"
+      exit 1
     fi
     if (( _durable_transit )); then
       warn "[reconcile] durable set intact but .installed missing — restoring flag"
@@ -2334,13 +2387,16 @@ main(){
     # v2.42 GPT #1: 逐项校验 meta→map 对应关系，不只计数
     if ! _meta_drift_detect; then
       warn "真相源不完整: .meta 与 .map 不一致（路由缺失或孤儿文件）"; _meta_ok=0
-      local _cleaned_routes=0
-      _cleanup_orphan_meta 2>/dev/null && _cleaned_routes=1
-      _cleanup_orphan_maps 2>/dev/null && _cleaned_routes=1
-      if (( _cleaned_routes )); then
+      local _repaired_routes=0
+      _acquire_lock
+      _repair_maps_from_meta 2>/dev/null && _repaired_routes=1
+      _release_lock
+      if (( _repaired_routes )); then
         if _meta_drift_detect 2>/dev/null; then
-          success "孤儿路由文件已清理，真相源已恢复一致"
+          success "缺失/漂移 .map 已根据 .meta 修复，真相源已恢复一致"
           _meta_ok=1
+        else
+          warn "已尝试从 .meta 修复 .map，但仍存在孤儿 .map 或损坏 .meta；为避免误删记录文件，未自动清理"
         fi
       fi
     fi
@@ -2384,7 +2440,7 @@ main(){
       fi
     fi
     if ! _meta_drift_detect; then
-      warn "路由真相源不完整（.meta/.map 不一致），请 --status 排查或重新 --import"
+      warn "路由真相源不完整（.meta/.map 不一致），请先执行 --status 排查；若确认需要重导再重新 --import"
       _reconcile_ok=0
     fi
     if (( _reconcile_ok == 0 )); then

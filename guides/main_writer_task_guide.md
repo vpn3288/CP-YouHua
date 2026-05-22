@@ -16,10 +16,10 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前已上传脚本事实：
 
-- 当前远端提交（本轮 v6.02 未推送前）: `e175d02 fix: harden landing install recovery v5.99`
+- 当前远端提交（本轮 v6.05 未推送前）: `6a9a06f fix: harden firewall persistence v6.02`
 - 中转脚本当前文件名: `install_transit.sh`
 - 落地脚本当前文件名: `install_landing.sh`
-- 两脚本头部版本: `v6.02`
+- 两脚本头部版本: `v6.05`
 - 当前工作区已通过 `git ls-files --eol` 验证为 LF；若未来出现 CRLF 并导致 `bash -n` 报 `$'{\r'`，列为 P0。
 
 第一轮真实优化已完成：
@@ -109,17 +109,17 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 ## 4. 当前脚本架构事实
 
-主笔每轮必须重新读取脚本，以下事实只描述当前 `v6.02` 脚本。
+主笔每轮必须重新读取脚本，以下事实只描述当前 `v6.05` 脚本。
 
 ### 4.1 中转脚本事实
 
 当前中转脚本头部写明：
 
-- `install_transit_v6.02.sh`
+- `install_transit_v6.05.sh`
 - 架构：CN2 GIA 纯 IPv4 中转机。
 - Nginx stream SNI 盲传。
 - 禁止代理核心和 IPv6 业务路径。
-- 当前版本说明：防火墙持久化失败显式返回，由调用者统一回滚。
+- 当前版本说明：`.map` 必须精确等于 `.meta` 投影，防隐藏 SNI 路由残留。
 
 关键结构：
 
@@ -139,7 +139,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 - SSH 端口探测，避免防火墙误封。
 - IPv4 校验，拒绝 IPv6 落地地址。
 - `.meta` 与 `.map` 漂移检测。
-- 孤儿 `.meta` 与孤儿 `.map` 清理。
+- 缺失/漂移 `.map` 可根据 `.meta` 修复，且 `.map` 必须精确等于 `.meta` 投影出来的单条路由；snippets 目录丢失时可重建；修复后 Nginx reload 失败会回滚并尝试恢复旧运行态；孤儿记录文件不得自动删除，避免误删订阅真相源。
 - Nginx stream 配置漂移检测和重写。
 - fallback blackhole `127.0.0.1:9999`。
 - UDP 443 DROP。
@@ -160,12 +160,12 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前落地脚本头部写明：
 
-- `install_landing_v6.02.sh`
+- `install_landing_v6.05.sh`
 - 架构：美国落地机。
 - Xray-core 4 协议单端口回落。
 - Cloudflare DNS-01 证书。
 - 禁止 IPv6 业务路径。
-- 当前版本说明：防火墙持久化失败显式返回，由调用者统一回滚。
+- 当前版本说明：同步版本号；落地业务逻辑不变。
 
 关键结构：
 
@@ -311,7 +311,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 每次真实优化后，两脚本版本必须统一递增。
 
-当前基线是 `v6.02`。下一轮真实优化应统一为 `v6.03`。默认真实修复要涨版本。
+当前基线是 `v6.05`。下一轮真实优化应统一为 `v6.06`。默认真实修复要涨版本。
 
 同步范围：
 

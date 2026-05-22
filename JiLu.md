@@ -496,3 +496,131 @@
   - 已做静态验证和最小 Bash 语义复现，未做 Debian 12 实机首装、iptables 持久化失败注入、恢复 service 重启实测、Cloudflare DNS-01 申请或卸载 nginx 共存漂移验证。
 - Commit:
   - 本次三轮合并提交：`fix: harden firewall persistence v6.02`
+
+## 2026-05-22 第 13 轮 - v6.03
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：修复中转机安装后运行一段时间再进入管理/状态检查时，`.meta/.map` 真相源被识别为缺失一个文件的问题。
+- 接受意见：
+  - 用户实机反馈：中转机安装脚本生成的记录文件初始正常，但几小时后被识别为文件缺失一个。复核确认 v6.02 启动自愈在 `.meta/.map` 漂移时会清理“孤儿”记录文件，可能把仍作为订阅真相源的 `.meta` 删除。
+  - 主笔复核：缺失或漂移的 `.map` 能从 `.meta` 中的域名、IPv4 和端口重建；反向从 `.map` 恢复 `.meta` 不可靠，因为 `.map` 不含 UUID、Trojan 密码和路径前缀。
+  - 主笔复核：自动修复 `.map` 后必须完成 Nginx reload；如果 reload 失败，应回滚本次 `.map` 修复，避免磁盘状态看似一致但运行态未生效。
+  - WSL Codex P1：`.installed` 丢失但 stream include 与 `.meta` 仍存在时，旧分支没有执行 v6.03 的 `.map` 修复，可能转入 `fresh_install()` 并扩大状态风险。
+  - WSL Codex P2：启动自愈会写 `.map` 和 reload Nginx，应与 `--import`/删除路由一样持有全局锁，避免两个管理窗口并发修复互相覆盖。
+  - WSL Codex P2：`--status` 仍提示重新 `--import`，会让用户误以为 v6.03 无自动修复入口；应提示无参数运行脚本触发修复。
+- 拒绝意见：
+  - 拒绝继续自动删除孤儿 `.meta` 或孤儿 `.map`：删除记录文件会扩大故障，尤其 `.meta` 是订阅生成真相源，丢失后无法从 `.map` 完整恢复 UUID/密码/路径。
+  - WSL Claude：无 P0-P2 问题，建议提交。其“无需继续改”的结论作为补丁主方向确认；WSL Codex 给出的 `.installed` 缺失和锁保护补充有代码证据，主笔接受并补入同一轮。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转脚本删除启动自愈中的 `_cleanup_orphan_meta()` 和 `_cleanup_orphan_maps()` 自动删除逻辑。
+  - 新增 `_repair_maps_from_meta()`，在 `.meta` 完整且合法时重建缺失或漂移的 `landing_*.map`，不再删除 `.meta` 记录文件。
+  - `.map` 修复前会快照既有 `.map`；修复后 Nginx reload 失败会回滚本次写入，防止运行态和磁盘态再次分裂。
+  - `.installed` 丢失但 stream include 与 `.meta` 尚存时，先尝试按 `.meta` 修复 `.map`；修复失败则拒绝进入全新安装，避免覆盖现有记录。
+  - 启动自愈调用 `_repair_maps_from_meta()` 前持有全局锁，避免并发管理窗口同时写 `.map`。
+  - `--status` 的 meta/map 不一致提示改为先运行无参数脚本触发自动修复，仍失败再重新 `--import`。
+  - 两脚本版本统一提升到 `v6.03`；落地脚本仅同步版本号，落地业务逻辑不变。
+  - README 和两份指南同步当前 v6.03 事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - WSL 最小复现：仅保留合法 `.meta`、删除对应 `.map` 后，`_repair_maps_from_meta()` 可重建 `.map`，且 `.meta` 保留。
+  - WSL 最小复现：模拟 `nginx_reload()` 失败时，`_repair_maps_from_meta()` 回滚本次新建 `.map`，并保留 `.meta`。
+  - WSL 最小复现：删除 `.installed` 和对应 `.map`、保留 stream include 与合法 `.meta` 时，启动 reconcile 分支会先修复 `.map` 并恢复安装标记，不进入全新安装。
+  - WSL Codex/GPT-5.5 新会话审查：接受 P1/P2 补充点。
+  - WSL Claude Code/Claude 4.7 新会话审查：未发现 P0-P2，确认主修复方向正确。
+- 残留风险：
+  - 已做静态验证和最小函数复现，未做 Debian 12 中转机实机长时间运行、真实 Nginx reload 失败注入、真实定时健康检查后状态复查。
+- Commit:
+  - 本次三轮合并提交：`fix: harden transit route recovery v6.05`
+
+## 2026-05-22 第 14 轮 - v6.04
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：复查 v6.03 `.meta/.map` 自愈补丁，补齐 snippets 目录整目录丢失和 reload 失败后旧运行态恢复两个边界。
+- 接受意见：
+  - WSL Codex P2：`_repair_maps_from_meta()` 要求 `$SNIPPETS_DIR` 已存在；如果 `/etc/nginx/stream-snippets` 被误删但 `.meta` 仍在，v6.03 无法从 `.meta` 重建 `.map`。
+  - WSL Codex P2：`.map` 修复后 Nginx reload 失败时，脚本只回滚磁盘 `.map`，未尝试把旧磁盘态重新 reload/restart 到运行态。
+- 拒绝意见：
+  - WSL Claude：未发现 P0-P2，建议继续保留 v6.03 主修复。该结论作为主方向确认；WSL Codex 两个边界项有明确代码位置和复现条件，主笔接受。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - `_repair_maps_from_meta()` 改为只要求 `CONF_DIR` 存在；当 `SNIPPETS_DIR` 整目录缺失时会先 `mkdir -p` 并设置权限，再从 `.meta` 重建 `.map`。
+  - `.map` 修复后 Nginx reload 失败时，先回滚本次 `.map` 写入，再尝试对回滚后的旧配置执行 `nginx -t` 与 `systemctl reload nginx`/`restart nginx`，失败时明确提示需要人工检查运行态。
+  - 两脚本版本统一提升到 `v6.04`；落地脚本仅同步版本号，落地业务逻辑不变。
+  - README 和两份指南同步当前 v6.04 事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - WSL 最小复现：删除整个 `SNIPPETS_DIR`、保留合法 `.meta` 时，`_repair_maps_from_meta()` 会重建目录和对应 `.map`。
+  - WSL 最小复现：既有 `.map` 漂移且模拟 `nginx_reload()` 失败时，`_repair_maps_from_meta()` 会恢复旧 `.map`，并保留 `.meta`。
+  - WSL Codex/GPT-5.5 新会话审查：接受两个 P2 边界补强。
+  - WSL Claude Code/Claude 4.7 新会话审查：未发现 P0-P2，确认主修复方向正确。
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 中转机实机长时间运行、真实 Nginx reload 半失败故障注入、并发管理窗口实测。
+- Commit:
+  - 本次三轮合并提交：`fix: harden transit route recovery v6.05`
+
+## 2026-05-22 第 15 轮 - v6.05
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：完成第 13-15 轮中转记录文件自愈修复链，补齐 `.map` 精确投影校验，防止隐藏 SNI 路由残留。
+- 接受意见：
+  - WSL Codex P1：`_meta_drift_detect()` 只检查 `.map` 中存在 `.meta` 对应 backend；如果同一个 `landing_*.map` 额外多出第二条 SNI 映射，状态仍可能判绿，Nginx 仍会加载不在 `.meta`/订阅中的隐藏路由。
+  - WSL Codex 精简建议：v6.03 新增 `.repair-map.*` 临时名前缀，但全局清理只覆盖 `.transit-mgr.*` 与 `.snap-recover.*`，应复用既有 `.snap-recover.*` 事务临时名前缀，减少残留路径。
+- 拒绝意见：
+  - WSL Claude：未发现 P0-P2，建议提交。该结论作为 v6.04 主修复方向确认；WSL Codex 的隐藏路由问题有明确代码证据，主笔接受。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转脚本新增 `_map_matches_meta_projection()`，要求每个 `landing_*.map` 去掉空行/注释后必须只有一条路由，且这条路由必须等于对应 `.meta` 的 `DOMAIN -> TRANSIT_IP:PORT` 投影。
+  - `_meta_drift_detect()` 改为使用精确投影校验，并对 `.meta` 中的 `DOMAIN` 也执行 `validate_domain()`；额外 SNI 行、错误 backend、非法域名都会判为漂移。
+  - `_repair_maps_from_meta()` 改为以精确投影为准；发现额外 SNI 行或漂移内容时会重写 `.map` 为单条可信投影。
+  - `_repair_maps_from_meta()` 的临时写入文件改回 `.snap-recover.*` 前缀，纳入既有全局清理范围。
+  - 两脚本版本统一提升到 `v6.05`；落地脚本仅同步版本号，落地业务逻辑不变。
+  - README 和两份指南同步当前 v6.05 事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - WSL 最小复现：合法 `.meta` 对应 `.map` 夹带额外 SNI 行时，`_meta_drift_detect()` 会判漂移，`_repair_maps_from_meta()` 会重写为单条可信投影。
+  - WSL 最小复现：合法 `.meta` 对应 `.map` 已精确匹配单条投影时，`_meta_drift_detect()` 判一致，`_repair_maps_from_meta()` 不做无意义重写。
+  - WSL Codex/GPT-5.5 新会话审查：接受 P1 隐藏路由和临时名前缀建议。
+  - WSL Claude Code/Claude 4.7 新会话审查：未发现 P0-P2，确认 v6.04 主修复方向正确。
+- 残留风险：
+  - 已做静态验证和最小函数复现，未做 Debian 12 中转机实机长时间运行、真实 Nginx reload 半失败故障注入、并发管理窗口实测。
+- Commit:
+  - 本次三轮合并提交：`fix: harden transit route recovery v6.05`
