@@ -16,22 +16,22 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前已上传脚本事实：
 
-- 当前远端提交: `05e100e Add files via upload`
-- 中转脚本当前文件名: `install_transit (1).sh`
-- 落地脚本当前文件名: `install_landing (1).sh`
-- 两脚本头部版本: `v5.90`
+- 当前远端提交: `28256df docs: add multi-ai optimization guides`
+- 中转脚本当前文件名: `install_transit.sh`
+- 落地脚本当前文件名: `install_landing.sh`
+- 两脚本头部版本: `v5.93`
 - 中转脚本约 2400 行。
 - 落地脚本约 3678 行。
 - 当前本地 Windows 工作区可能检出为 CRLF，`bash -n` 会在 `die() {\r` 报错。
 
-第一轮真实优化的最高优先级：
+第一轮真实优化已完成：
 
-1. 把脚本文件名规范为 `install_transit.sh` 和 `install_landing.sh`。
-2. 强制脚本 LF 换行，保证 `bash -n` 通过。
-3. 同步 README 与 `JiLu.md`，记录“文件名与换行修复”。
-4. 不改业务逻辑，先让仓库进入可执行、可审查状态。
+1. 脚本文件名已规范为 `install_transit.sh` 和 `install_landing.sh`。
+2. 脚本已确认使用 LF 换行，`bash -n` 可验证。
+3. README 与 `JiLu.md` 已记录“文件名与换行修复”。
+4. 未改业务逻辑，仓库已进入可执行、可审查状态。
 
-主笔不能假装带 `(1)` 的文件名是最终状态。后续所有指南、README、命令和审查提示都应以规范文件名为准；在规范完成前，审查时必须明确引用当前真实文件名。
+后续所有指南、README、命令和审查提示都应以规范文件名为准。
 
 ## 2. 多 AI 分工
 
@@ -111,17 +111,17 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 ## 4. 当前脚本架构事实
 
-主笔每轮必须重新读取脚本，以下事实只描述当前 `v5.90` 已上传脚本。
+主笔每轮必须重新读取脚本，以下事实只描述当前 `v5.93` 脚本。
 
 ### 4.1 中转脚本事实
 
 当前中转脚本头部写明：
 
-- `install_transit_v5.90.sh`
+- `install_transit_v5.93.sh`
 - 架构：CN2 GIA 纯 IPv4 中转机。
 - Nginx stream SNI 盲传。
 - 禁止代理核心和 IPv6 业务路径。
-- 当前版本说明：收紧 SNI 黑洞验收、stream 漂移契约和 strict 公网 IPv4 校验。
+- 当前版本说明：同步版本号；中转业务逻辑不变。
 
 关键结构：
 
@@ -162,12 +162,12 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前落地脚本头部写明：
 
-- `install_landing_v5.90.sh`
+- `install_landing_v5.93.sh`
 - 架构：美国落地机。
 - Xray-core 4 协议单端口回落。
 - Cloudflare DNS-01 证书。
 - 禁止 IPv6 业务路径。
-- 当前版本说明：隔离 acme cron、修复新增节点证书失败清理并精简无头安装包装。
+- 当前版本说明：精简公网 IPv4 获取冗余 RETURN trap，并消除管理菜单递归栈增长。
 
 关键结构：
 
@@ -251,7 +251,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 4. 确认脚本规范文件名是否存在：
    - `install_transit.sh`
    - `install_landing.sh`
-5. 如果仍是 `install_transit (1).sh`、`install_landing (1).sh`，第一轮先规范文件名。
+5. 如果异常出现 `install_transit (1).sh`、`install_landing (1).sh`，先恢复规范文件名。
 6. 完整阅读两份脚本和 `JiLu.md`。
 7. 记录当前脚本版本、文件头版本、README 版本、最近三轮记录。
 8. 检查换行：
@@ -313,7 +313,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 每次真实优化后，两脚本版本必须统一递增。
 
-当前基线是 `v5.90`。下一轮真实优化应统一为 `v5.91`，除非只是修复文件名和 LF 换行且用户要求不涨业务版本。默认真实修复要涨版本。
+当前基线是 `v5.93`。下一轮真实优化应统一为 `v5.94`。默认真实修复要涨版本。
 
 同步范围：
 

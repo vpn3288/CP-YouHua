@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v5.90.sh — 落地机安装脚本 v5.90
+# install_landing_v5.93.sh — 落地机安装脚本 v5.93
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v5.90: 隔离 acme cron、修复新增节点证书失败清理并精简无头安装包装。
+# v5.93: 精简公网 IPv4 获取冗余 RETURN trap，并消除管理菜单递归栈增长。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v5.90"
+readonly VERSION="v5.93"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -323,6 +323,15 @@ validate_port(){
   (( $1 >= 1 && $1 <= 65535 )) || { error "端口需在 1-65535: $1"; return 1; }
 }
 
+extra_ports_lines(){
+  local input="${1:-}" old_ifs="$IFS"
+  local -a ports=()
+  IFS=$' \t\n'
+  read -r -a ports <<< "$input"
+  IFS="$old_ifs"
+  printf '%s\n' "${ports[@]}"
+}
+
 validate_password(){
   local p="$1"
   [[ ${#p} -ge 16 ]] || { error "Trojan 密码至少 16 位"; return 1; }
@@ -348,7 +357,6 @@ HELP
 }
 
 get_public_ip(){
-  trap 'IFS=$'"'"'\n\t'"'"'' RETURN  # Restore script-global IFS
   local ip=""
   local src attempt
   for attempt in 1 2; do
@@ -1769,13 +1777,14 @@ setup_firewall(){
   [[ -f "$_extra_cfg" ]] && _saved_extra=$(grep '^EXTRA_PORTS=' "$_extra_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   [[ -n "$_saved_extra" ]] && _extra_ports="$_saved_extra"
   if [[ -n "$_extra_ports" ]]; then
-    for _ep in $_extra_ports; do
+    while IFS= read -r _ep; do
+      [[ -n "$_ep" ]] || continue
       if [[ "$_ep" =~ ^[0-9]+$ ]] && (( _ep >= 1 && _ep <= 65535 )); then
         iptables -w 2 -A "$FW_TMP" -p tcp --dport "$_ep" -m comment --comment "xray-landing-extra" -j ACCEPT \
           || _fw_die "添加额外端口 ${_ep} 放行规则失败"
         info "  额外端口放行: $_ep"
       fi
-    done
+    done < <(extra_ports_lines "$_extra_ports")
   fi
   local count=0
   while IFS= read -r tip; do
@@ -1885,11 +1894,12 @@ _persist_iptables(){
   [[ -f "$_extra_cfg" ]] && _saved_extra=$(grep '^EXTRA_PORTS=' "$_extra_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   [[ -n "$_saved_extra" ]] && _extra_ports="$_saved_extra"
   if [[ -n "$_extra_ports" ]]; then
-    for _ep in $_extra_ports; do
+    while IFS= read -r _ep; do
+      [[ -n "$_ep" ]] || continue
       if [[ "$_ep" =~ ^[0-9]+$ ]] && (( _ep >= 1 && _ep <= 65535 )); then
         _transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW -p tcp --dport ${_ep} -m comment --comment 'xray-landing-extra' -j ACCEPT"$'\n'
       fi
-    done
+    done < <(extra_ports_lines "$_extra_ports")
   fi
 
   export FW_SIG="$_fw_sig" SSH_PORT_FALLBACK="$ssh_port" FW_CHAIN FW_CHAIN6 LANDING_PORT TRANSIT_RULES="$_transit_rules"
@@ -3141,36 +3151,38 @@ show_all_nodes_info(){
 }
 
 installed_menu(){
-  echo ""
-  echo -e "${BOLD}${CYAN}══ 落地机管理菜单 ══════════════════════════════════════════════${NC}"
-  local n=0
-  while IFS= read -r meta; do
-    [[ -f "$meta" ]] || continue
-    local dom ip ts
-    dom=$(grep '^DOMAIN='     "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || echo "?")
-    ip=$(grep  '^TRANSIT_IP=' "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || echo "?")
-    ts=$(grep  '^CREATED='    "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || echo "?")
-    printf "  [节点%-2d] %-38s 中转: %-18s 创建: %s\n" $((++n)) "$dom" "$ip" "$ts"
-  done < <(find "${MANAGER_BASE}/nodes" -name "*.conf" -not -name ".tmp-node-*.conf" -type f 2>/dev/null | sort)
-  [[ $n -eq 0 ]] && warn "（无已配置节点）"
-  echo ""
-  echo "  1. 增加新节点"
-  echo "  2. 删除指定节点"
-  echo "  3. 修改落地机监听端口"
-  echo "  4. 清除本系统所有数据（不影响 mack-a）"
-  echo "  5. 退出"
-  echo "  6. 显示所有节点 Token 与订阅链接"
-  echo ""
-  read -rp "请选择 [1-6]: " CHOICE
-  case "$CHOICE" in
-    1) add_node;      installed_menu ;;
-    2) delete_node;   installed_menu ;;
-    3) do_set_port;   installed_menu ;;
-    4) purge_all ;;
-    5) exit 0 ;;
-    6) show_all_nodes_info; installed_menu ;;
-    *) warn "无效选项: ${CHOICE}"; installed_menu ;;
-  esac
+  while true; do
+    echo ""
+    echo -e "${BOLD}${CYAN}══ 落地机管理菜单 ══════════════════════════════════════════════${NC}"
+    local n=0
+    while IFS= read -r meta; do
+      [[ -f "$meta" ]] || continue
+      local dom ip ts
+      dom=$(grep '^DOMAIN='     "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || echo "?")
+      ip=$(grep  '^TRANSIT_IP=' "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || echo "?")
+      ts=$(grep  '^CREATED='    "$meta" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || echo "?")
+      printf "  [节点%-2d] %-38s 中转: %-18s 创建: %s\n" $((++n)) "$dom" "$ip" "$ts"
+    done < <(find "${MANAGER_BASE}/nodes" -name "*.conf" -not -name ".tmp-node-*.conf" -type f 2>/dev/null | sort)
+    [[ $n -eq 0 ]] && warn "（无已配置节点）"
+    echo ""
+    echo "  1. 增加新节点"
+    echo "  2. 删除指定节点"
+    echo "  3. 修改落地机监听端口"
+    echo "  4. 清除本系统所有数据（不影响 mack-a）"
+    echo "  5. 退出"
+    echo "  6. 显示所有节点 Token 与订阅链接"
+    echo ""
+    read -rp "请选择 [1-6]: " CHOICE || return 0
+    case "$CHOICE" in
+      1) add_node ;;
+      2) delete_node ;;
+      3) do_set_port ;;
+      4) purge_all; return 0 ;;
+      5) exit 0 ;;
+      6) show_all_nodes_info ;;
+      *) warn "无效选项: ${CHOICE}" ;;
+    esac
+  done
 }
 
 fresh_install(){
@@ -3208,9 +3220,10 @@ fresh_install(){
     EXTRA_PORTS=$(trim "$EXTRA_PORTS")
     if [[ -n "$EXTRA_PORTS" ]]; then
       local _auto_ep
-      for _auto_ep in $EXTRA_PORTS; do
+      while IFS= read -r _auto_ep; do
+        [[ -n "$_auto_ep" ]] || continue
         validate_port "$_auto_ep" || die "无头模式 EXTRA_PORTS 含非法端口: $_auto_ep"
-      done
+      done < <(extra_ports_lines "$EXTRA_PORTS")
     fi
     if [[ -n "${LANDING_AUTO_PUBLIC_IP:-}" || -n "${FAKE_IP:-}" ]]; then
       PUB_IP="${LANDING_AUTO_PUBLIC_IP:-${FAKE_IP}}"
@@ -3293,13 +3306,14 @@ fresh_install(){
       fi
       
       local _invalid=0
-      for _port in $EXTRA_PORTS; do
+      while IFS= read -r _port; do
+        [[ -n "$_port" ]] || continue
         if ! [[ "$_port" =~ ^[0-9]+$ ]] || (( _port < 1 || _port > 65535 )); then
           warn "无效端口: $_port（必须是 1-65535 之间的数字）"
           _invalid=1
           break
         fi
-      done
+      done < <(extra_ports_lines "$EXTRA_PORTS")
       
       if (( _invalid == 0 )); then
         break  # 所有端口合法
@@ -3566,7 +3580,7 @@ _check_update(){
   local cur_ver="$VERSION"
   local remote
   remote=$(curl -fsSL --connect-timeout 3 --retry 1 \
-    "https://raw.githubusercontent.com/vpn3288/Chained-Proxy/main/${self_name}" \
+    "https://raw.githubusercontent.com/vpn3288/CP-YouHua/main/${self_name}" \
     2>/dev/null | grep -o 'v[0-9]\+\.[0-9]\+' | head -1) || return 0
   [[ -n "$remote" ]] && _ver_gt "$remote" "$cur_ver" && warn "发现新版本 ${remote}！" || true
 }

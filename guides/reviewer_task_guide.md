@@ -20,12 +20,12 @@
 - `install_transit.sh`
 - `install_landing.sh`
 
-当前上传脚本可能仍是：
+当前规范脚本文件名应为：
 
-- `install_transit (1).sh`
-- `install_landing (1).sh`
+- `install_transit.sh`
+- `install_landing.sh`
 
-如果仍是带 `(1)` 的文件名，审查者必须把“文件名不规范，使用命令不友好，README/指南无法稳定引用”列为优先修复项。当前本地 Windows 工作区还可能是 CRLF，`bash -n` 会直接报 `$'{\r'` 语法错误；如果复现，列为 P0。
+如果再次出现带 `(1)` 的文件名，审查者必须把“文件名不规范，使用命令不友好，README/指南无法稳定引用”列为优先修复项。当前本地 Windows 工作区仍需检查换行；如果 CRLF 导致 `bash -n` 报 `$'{\r'` 语法错误，列为 P0。
 
 记录文件：
 
@@ -72,13 +72,13 @@
 
 ## 3. 当前脚本事实
 
-审查者每轮必须重新读取脚本，以下事实只描述当前 v5.90 上传版本。
+审查者每轮必须重新读取脚本，以下事实只描述当前 v5.93 脚本。
 
 ### 3.1 中转脚本
 
 当前头部：
 
-- `install_transit_v5.90.sh`
+- `install_transit_v5.93.sh`
 - CN2 GIA 纯 IPv4 中转机。
 - Nginx stream SNI 盲传。
 - 禁止代理核心和 IPv6 业务路径。
@@ -116,7 +116,7 @@
 
 当前头部：
 
-- `install_landing_v5.90.sh`
+- `install_landing_v5.93.sh`
 - 美国 IPv4 落地机。
 - Xray-core 4 协议单端口回落。
 - Cloudflare DNS-01 证书。

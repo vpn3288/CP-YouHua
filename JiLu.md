@@ -1,1 +1,114 @@
+## 2026-05-22 第 1 轮 - v5.91
 
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：先修复仓库上传态问题，让脚本拥有规范文件名、LF 换行和可执行的静态校验基础。
+- 接受意见：
+  - 接受项目指南中的 P0 修复项：`install_transit (1).sh`、`install_landing (1).sh` 文件名不适合 README、指南和用户命令长期引用，改为规范文件名。
+  - 接受项目指南中的换行验收项：确认脚本为 LF 换行，避免 Windows CRLF 导致 `bash -n` 在 Debian 上直接失败。
+- 拒绝意见：
+  - 无。本轮不处理业务逻辑精简或架构调整，避免在基础文件状态未稳定前引入额外行为变化。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 将 `install_transit (1).sh` 重命名为 `install_transit.sh`。
+  - 将 `install_landing (1).sh` 重命名为 `install_landing.sh`。
+  - 两份脚本统一从 `v5.90` 提升到 `v5.91`，版本说明限定为文件名与 LF 换行修复，未改业务逻辑。
+  - README 和指南改为引用规范脚本文件名，去除“当前仍可能带 (1)”的过时事实。
+- 验证：
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 实机安装验证。
+- Commit:
+  - 随第 3 轮真实优化统一提交。
+
+## 2026-05-22 第 2 轮 - v5.92
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决第一轮审查意见中暴露的真实脚本问题，修复低风险高收益的中转安装阻断点、落地额外端口解析和更新源漂移。
+- 接受意见：
+  - WSL Codex P1：中转 `fresh_install` 的 `awk '$4 ~ /:443$/ {exit 0} END {exit 1}'` 会被 `END` 覆盖返回值，导致 443 占用检测失效。
+  - WSL Codex P1：中转交互式全新安装缺少与 `--import` 首装路径一致的代理核心冲突检查。
+  - WSL Codex P2：落地 `EXTRA_PORTS` 文案要求多个端口用空格分隔，但全局 `IFS=$'\n\t'` 导致空格分隔实际不可用。
+  - WSL Codex P2：两个脚本 `_check_update` 仍指向旧仓库 `vpn3288/Chained-Proxy`，会造成更新提醒漂移。
+- 改写后接受：
+  - 落地额外端口解析未直接在每个循环里局部改 `IFS`，而是新增 `extra_ports_lines()` 统一把空格、Tab、换行分隔的端口转换为逐行输入，减少四处循环分裂。
+- 拒绝意见：
+  - WSL Codex P3：落地 `installed_menu` 递归改循环，暂缓。该项是长期菜单栈风险，不是本轮阻断点，改动面比当前 P1/P2 更大。
+  - WSL Codex P3：`get_public_ip` 的 `RETURN` trap 精简，暂缓。需要单独审查是否影响函数返回路径。
+  - WSL Claude：无阻断问题。其“本轮只做文件名/LF”的结论接受为第一轮验收，不作为第二轮业务修复的反证。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转脚本新增 `_assert_no_proxy_core_transit()`，并在 `--import` 首装和交互式 `fresh_install` 中统一调用。
+  - 中转脚本修复两处 443 占用检测 awk，改为 `found` 标记后在 `END` 中返回。
+  - 落地脚本新增 `extra_ports_lines()`，修复交互、headless、防火墙运行态和持久化四处额外端口空格分隔解析。
+  - 两个脚本 `_check_update` 的 raw GitHub URL 改为 `vpn3288/CP-YouHua/main/${self_name}`。
+  - 两脚本版本统一提升到 `v5.92`，README 和指南同步当前版本事实。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `shellcheck -S error install_transit.sh install_landing.sh`
+  - `git ls-files --eol`
+  - `git diff --check`
+  - WSL 最小复现：确认旧 awk 写法匹配 443 后返回 1；新写法匹配 443 后返回 0。
+  - WSL 最小复现：`extra_ports_lines "10086 8080\t8443"` 输出三个独立端口。
+- 残留风险：
+  - 已做静态验证和最小逻辑复现，未做 Debian 12 实机安装、防火墙落盘、Cloudflare DNS-01 或完整链路验证。
+- Commit:
+  - 随第 3 轮真实优化统一提交。
+
+## 2026-05-22 第 3 轮 - v5.93
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：处理上轮暂缓的低风险精简项，只接受有明确证据的维护收益，不触碰防火墙、证书、Xray 配置、输入重试和回滚路径。
+- 接受意见：
+  - WSL Codex 与 WSL Claude 均确认：落地 `get_public_ip()` 内的 `RETURN` trap 没有必要。函数自身不修改 `IFS`，且该 trap 可能覆盖外层函数的 `RETURN` trap，属于误导性防御代码。
+  - WSL Codex 与 WSL Claude 均确认：落地 `installed_menu()` 通过 `installed_menu` 自调用回到菜单，长时间交互或大量误输入会增长 Bash 函数栈，改为 `while true` 可消除该维护风险。
+- 改写后接受：
+  - 菜单递归改循环时保留原语义：`purge_all` 后返回，不再继续显示菜单；`5)` 仍直接 `exit 0`；无效输入仍提示后继续循环。
+- 拒绝意见：
+  - 无。两位审查者对本轮两个候选点均给出代码证据和低风险补丁方向。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 删除落地 `get_public_ip()` 中无实际恢复作用的 `trap ... RETURN`。
+  - 将落地 `installed_menu()` 从递归自调用改为 `while true` 循环，避免菜单长期使用时函数栈增长。
+  - 两脚本版本统一提升到 `v5.93`；中转脚本仅同步版本号，中转业务逻辑不变。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `shellcheck -S error install_transit.sh install_landing.sh`
+  - `git ls-files --eol`
+  - `git diff --check`
+  - `rg -n 'trap .*RETURN|installed_menu;|v5.92|v5.91|v5.90|Chained-Proxy' README.md guides install_transit.sh install_landing.sh`
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 实机安装、管理菜单交互实测、防火墙落盘或完整链路验证。
+- Commit:
+  - 本次三轮合并提交：`chore: normalize scripts and fix v5.93 issues`

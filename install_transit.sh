@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v5.90.sh — 中转机安装脚本 v5.90
+# install_transit_v5.93.sh — 中转机安装脚本 v5.93
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v5.90: 收紧 SNI 黑洞验收、stream 漂移契约和 strict 公网 IPv4 校验。
+# v5.93: 同步版本号；中转业务逻辑不变。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v5.90"
+readonly VERSION="v5.93"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -229,6 +229,21 @@ validate_ip(){
     return 1
   fi
   validate_ipv4 "$ip"
+}
+
+_assert_no_proxy_core_transit(){
+  if command -v xray &>/dev/null || [[ -f /usr/local/bin/xray ]] \
+     || command -v v2ray &>/dev/null || [[ -f /usr/local/bin/v2ray ]] \
+     || command -v trojan &>/dev/null || [[ -f /usr/local/bin/trojan ]] \
+     || command -v sing-box &>/dev/null || [[ -f /usr/local/bin/sing-box ]]; then
+    die "检测到代理核心已安装，中转机不能运行代理服务，请使用纯净系统"
+  fi
+  if command -v mack-a &>/dev/null || [[ -f /etc/v2ray-agent/install.sh ]]; then
+    die "检测到 mack-a 已安装，请先卸载 mack-a 后再安装本脚本"
+  fi
+  if [[ -f /etc/nginx/nginx.conf ]] && grep -q "v2ray-agent" /etc/nginx/nginx.conf 2>/dev/null; then
+    die "检测到mack-a的nginx配置，请先卸载mack-a"
+  fi
 }
 
 validate_port(){
@@ -1686,20 +1701,7 @@ print(decoded)
 
   if [[ ! -f "$INSTALLED_FLAG" && "${__TRANSIT_FRESH_INSTALL_TRAP_ACTIVE:-0}" == "0" ]]; then
     info "--import 触发首次安装初始化 ..."
-    # [v5.49-CRITICAL-2] 检测代理核心冲突 - 中转机不能运行代理服务
-    if command -v xray &>/dev/null || [[ -f /usr/local/bin/xray ]] \
-       || command -v v2ray &>/dev/null || [[ -f /usr/local/bin/v2ray ]] \
-       || command -v trojan &>/dev/null || [[ -f /usr/local/bin/trojan ]] \
-       || command -v sing-box &>/dev/null || [[ -f /usr/local/bin/sing-box ]]; then
-      die "检测到代理核心已安装，中转机不能运行代理服务，请使用纯净系统"
-    fi
-    if command -v mack-a &>/dev/null || [[ -f /etc/v2ray-agent/install.sh ]]; then
-      die "检测到 mack-a 已安装，请先卸载 mack-a 后再安装本脚本"
-    fi
-    # [v5.18-T-HIGH-2] 增强mack-a检测 - 检查nginx配置冲突
-    if [[ -f /etc/nginx/nginx.conf ]] && grep -q "v2ray-agent" /etc/nginx/nginx.conf 2>/dev/null; then
-      die "检测到mack-a的nginx配置，请先卸载mack-a"
-    fi
+    _assert_no_proxy_core_transit
     if ss -tlnp 2>/dev/null | grep -q ':443 '; then
       die "443 端口已被占用！请先停止冲突服务后再安装（建议先执行 systemctl stop nginx xray* mack-a*）"
     fi
@@ -2160,12 +2162,13 @@ fresh_install(){
     read -rp "确认开始安装？[y/N]: " CONFIRM
     [[ "$CONFIRM" =~ ^[Yy]$ ]] || { info "已取消"; exit 0; }
   fi
+  _assert_no_proxy_core_transit
 
   # FW-2 FIX: 半安装死锁：防火墙配置中断后 nginx 仍占用 443，重试时 die 导致无限死锁
   # 判断逻辑：
   #   ① nginx 占 443 + stream include 存在 → 本脚本半装，stop nginx 后继续重装
   #   ② 其他进程占 443 → 真正冲突，die 要求用户手动处理
-  if ss -tlnp 2>/dev/null | awk '$4 ~ /:443$/ {exit 0} END {exit 1}' 2>/dev/null; then
+  if ss -tlnp 2>/dev/null | awk '$4 ~ /:443$/ {found=1} END {exit found ? 0 : 1}' 2>/dev/null; then
     if command -v mack-a &>/dev/null || [[ -f /etc/v2ray-agent/install.sh ]]; then
       warn "检测到 mack-a 已安装，请先停止 mack-a 服务后再安装本脚本"
     fi
@@ -2180,7 +2183,7 @@ fresh_install(){
       systemctl stop nginx 2>/dev/null || nginx -s stop 2>/dev/null || true
       sleep 1
       # 再次确认 443 已释放
-      if ss -tlnp 2>/dev/null | awk '$4 ~ /:443$/ {exit 0} END {exit 1}' 2>/dev/null; then
+      if ss -tlnp 2>/dev/null | awk '$4 ~ /:443$/ {found=1} END {exit found ? 0 : 1}' 2>/dev/null; then
         die "nginx 停止后 443 仍被占用（可能有其他进程），请手动执行: ss -tlnp | awk '\$4 ~ /:443\$/ {print}'"
       fi
       info "443 端口已释放，继续安装..."
@@ -2257,7 +2260,7 @@ _check_update(){
   local cur_ver="$VERSION"
   local remote
   remote=$(curl -fsSL --connect-timeout 5 --max-time 10 --retry 2 \
-    "https://raw.githubusercontent.com/vpn3288/Chained-Proxy/main/${self_name}" \
+    "https://raw.githubusercontent.com/vpn3288/CP-YouHua/main/${self_name}" \
     2>/dev/null | grep -o 'v[0-9]\+\.[0-9]\+' | head -1) || return 0
   [[ -n "$remote" ]] && _ver_gt "$remote" "$cur_ver" && warn "发现新版本 ${remote}！建议重新下载" || true
 }
