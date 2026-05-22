@@ -14,7 +14,7 @@ bash -n install_transit.sh
 bash -n install_landing.sh
 ok "bash syntax"
 
-git ls-files --eol install_transit.sh install_landing.sh README.md JiLu.md guides/main_writer_task_guide.md guides/reviewer_task_guide.md \
+git ls-files --eol install_transit.sh install_landing.sh README.md JiLu.md guides/main_writer_task_guide.md guides/reviewer_task_guide.md tests/local_static_invariants.sh tests/ssh_hostkey_probe.sh tests/pre_real_machine_local_gate.sh \
   | awk '$1!="i/lf" || $2!="w/lf" {bad=1; print} END {exit bad ? 1 : 0}' \
   || fail "tracked text files must be LF"
 ok "LF endings"
@@ -31,11 +31,23 @@ valid_token=$(
   printf '%s' '{"ip":"1.2.3.4","dom":"example.com","port":443,"uuid":"11111111-1111-4111-8111-111111111111","pwd":"abcdefghijklmnop","pfx":"abc"}' \
     | base64 | tr -d '\n'
 )
-bash -c 'source <(sed "\$d" install_transit.sh); extract_import_token_json_no_deps "$1" | grep -q "\"dom\":\"example.com\""' _ "$valid_token" \
+extractor_tmp="$(mktemp)"
+trap 'rm -f "$extractor_tmp"' EXIT
+{
+  printf '%s\n' 'die(){ printf "%s\n" "$*" >&2; exit 1; }'
+  awk '/^extract_import_token_json_no_deps\(\)/{p=1} p{print} p && /^}/{exit}' install_transit.sh
+} >"$extractor_tmp"
+bash -c 'source "$1"; extract_import_token_json_no_deps "$2" | grep -q "\"dom\":\"example.com\""' _ "$extractor_tmp" "$valid_token" \
   || fail "valid import token pre-parse failed"
-if bash -c 'source <(sed "\$d" install_transit.sh); extract_import_token_json_no_deps "$1" >/dev/null' _ 'eyJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' 2>/dev/null; then
+if bash -c 'source "$1"; extract_import_token_json_no_deps "$2" >/dev/null' _ "$extractor_tmp" 'eyJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' 2>/dev/null; then
   fail "invalid base64-like token passed pre-parse"
 fi
+malformed_token=$(printf '%s' '{"ip":,"dom":"example.com"}' | base64 | tr -d '\n')
+if bash -c 'source "$1"; extract_import_token_json_no_deps "$2" >/dev/null' _ "$extractor_tmp" "$malformed_token" 2>/dev/null; then
+  fail "malformed JSON token passed pre-parse"
+fi
+rm -f "$extractor_tmp"
+trap - EXIT
 ok "transit token pre-parse"
 
 python3 - <<'PY'

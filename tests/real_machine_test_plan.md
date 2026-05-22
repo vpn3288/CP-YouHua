@@ -8,7 +8,7 @@
 2. 若 SSH 提示 `REMOTE HOST IDENTIFICATION HAS CHANGED`：
    - 先通过 VPS 控制台确认机器确实已 DD 重装。
    - 记录控制台展示的 SSH host key 指纹。
-   - 可在 WSL 中运行 `bash tests/ssh_hostkey_probe.sh` 只读获取当前公网 SSH 指纹。
+   - 可在 WSL 中运行 `bash tests/ssh_hostkey_probe.sh <ip>=SHA256:<控制台指纹>` 只读比较当前公网 SSH 指纹。
    - 仅在指纹一致后执行 `ssh-keygen -R <ip>` 并重新连接。
    - 不要全局关闭 host key 检查。
 3. Cloudflare 测试 Token 使用最小权限和测试 Zone：
@@ -29,6 +29,7 @@ bash -n install_transit.sh
 bash -n install_landing.sh
 git diff --check
 bash tests/local_static_invariants.sh
+bash tests/pre_real_machine_local_gate.sh
 ```
 
 预期：

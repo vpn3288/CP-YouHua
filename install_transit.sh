@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.15.sh — 中转机安装脚本 v6.15
+# install_transit_v6.16.sh — 中转机安装脚本 v6.16
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.15: 导入 token 在依赖安装前完成无副作用 Base64/JSON 最小预解析。
+# v6.16: 导入 token 预解析拒绝畸形 JSON，避免坏 token 触发安装副作用。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.15"
+readonly VERSION="v6.16"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -1710,10 +1710,18 @@ extract_import_token_json_no_deps(){
     || die "无法解析 Base64 token，请检查输入"
   printf '%s' "$decoded" | grep -Eq '^[[:space:]]*\{.*\}[[:space:]]*$' \
     || die "token 解码后不是 JSON 对象，请重新从落地机复制完整 token"
-  printf '%s' "$decoded" | grep -Eq '"ip"[[:space:]]*:' \
-    || die "token 预校验失败（ip 字段缺失）——请重新从落地机复制完整的导入命令"
-  printf '%s' "$decoded" | grep -Eq '"dom"[[:space:]]*:' \
-    || die "token 预校验失败（dom 字段缺失）——请重新从落地机复制完整的导入命令"
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$decoded" | python3 -c "
+import json
+import sys
+d = json.loads(sys.stdin.read())
+if not isinstance(d, dict) or not d.get('ip') or not d.get('dom'):
+    raise SystemExit(1)
+" 2>/dev/null || die "token 预校验失败（JSON 畸形或 ip/dom 字段缺失）——请重新从落地机复制完整的导入命令"
+  else
+    printf '%s' "$decoded" | grep -Eq '^[[:space:]]*\{[[:space:]]*"ip"[[:space:]]*:[[:space:]]*"[^"]+"[[:space:]]*,[[:space:]]*"dom"[[:space:]]*:[[:space:]]*"[^"]+"([[:space:]]*,[[:space:]]*"[A-Za-z0-9_]+"[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+))*[[:space:]]*\}[[:space:]]*$' \
+      || die "token 预校验失败（JSON 畸形或 ip/dom 字段缺失）——请重新从落地机复制完整的导入命令"
+  fi
   printf '%s' "$decoded"
 }
 

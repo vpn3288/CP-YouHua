@@ -1072,3 +1072,49 @@
   - 指纹已只读获取，但仍需和 VPS 控制台显示值核对后才能更新本机 `known_hosts` 并进入实机安装。
 - Commit:
   - 待提交 `test: add ssh hostkey probe`
+
+## 2026-05-22 第 26 轮 - v6.16
+
+- 主笔：Codex/GPT-5.5
+- 审查者：本轮未新增脚本审查；主笔根据本地回归测试结果裁决。
+- 本轮目标：修复 v6.15 中转 token 预解析仍可能放过畸形 JSON 的问题，并把实机测试前置门禁固化为脚本。
+- 接受意见：
+  - 本地回归复现：形如 Base64、解码后包含 `ip/dom` 字样但 JSON 语法畸形的 token，v6.15 只用 `grep` 字段存在性判断，仍可能通过无副作用预检，随后才在后续 Python 解析阶段失败。
+  - 实机测试前需要一个统一本地门禁，防止在工作区未提交、LF/语法/静态不变量不满足时误进远程安装循环。
+- 拒绝意见：
+  - 不接受在仓库里写入服务器密码、Cloudflare Token、GitHub Token、实机日志或临时导入 token；实机测试必须使用已轮换的最小权限密钥，并且只保存在交互会话中。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `tests/local_static_invariants.sh`
+  - `tests/ssh_hostkey_probe.sh`
+  - `tests/pre_real_machine_local_gate.sh`
+  - `JiLu.md`
+- 真实改动：
+  - 中转 `extract_import_token_json_no_deps()` 在存在 `python3` 时使用 `json.loads()` 校验 token 必须是 JSON 对象且包含非空 `ip/dom`，畸形 JSON 会在依赖安装、拿锁和 Nginx/防火墙副作用前失败。
+  - 无 `python3` 的极简环境保留保守 fallback，只接受落地脚本当前生成的紧凑 token 字段顺序，避免误放宽坏 token。
+  - `tests/local_static_invariants.sh` 改为只抽取 token 预解析函数测试，避免 `source` 整个安装脚本触发主入口副作用，并新增畸形 JSON token 回归用例。
+  - 新增 `tests/pre_real_machine_local_gate.sh`，实机安装前统一检查工作区干净、`git diff --check`、两脚本和测试脚本语法、LF 换行与本地静态不变量。
+  - `tests/ssh_hostkey_probe.sh` 不再内置具体服务器 IP；必须通过参数或 `SSH_HOSTKEY_PROBE_HOSTS` 指定目标，并支持和控制台指纹做只读比较。
+  - 两脚本版本统一提升到 `v6.16`；落地脚本仅同步版本号，落地业务逻辑不变。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash -n tests/pre_real_machine_local_gate.sh`
+  - `bash -n tests/ssh_hostkey_probe.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh tests/local_static_invariants.sh tests/ssh_hostkey_probe.sh tests/pre_real_machine_local_gate.sh'`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+- 残留风险：
+  - 已做本地静态验证和只读 SSH 指纹探测，尚未使用已轮换的新 Cloudflare 最小权限 Token 跑 DNS-01 成功路径、节点连通、中转导入、卸载重装和 DD 重装循环。
+  - 聊天中暴露过的 GitHub Token、Cloudflare Token、服务器密码必须在继续实机写入测试前全部轮换；本轮未使用、未保存、未提交这些秘密。
+- Commit:
+  - 待提交 `fix: reject malformed transit import token v6.16`
