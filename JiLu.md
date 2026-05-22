@@ -112,3 +112,126 @@
   - 已做静态验证，未做 Debian 12 实机安装、管理菜单交互实测、防火墙落盘或完整链路验证。
 - Commit:
   - 本次三轮合并提交：`chore: normalize scripts and fix v5.93 issues`
+
+## 2026-05-22 第 4 轮 - v5.94
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决 v5.93 新审查意见，优先处理落地证书工具供应链校验漂移问题，不触碰 Xray 配置、防火墙、输入重试和回滚路径。
+- 接受意见：
+  - WSL Codex P2：落地脚本先下载固定 URL 并校验 acme.sh 3.0.8 tarball，随后立即执行 `acme.sh --upgrade --auto-upgrade`，会把已校验版本升级到脚本未固定 hash 校验的版本，削弱供应链校验价值。
+  - WSL Codex P3：`_acme_hash` 缺少维护注释，后续升级 acme.sh 时不易确认 URL、解压目录名和 sha256 必须同步更新。
+- 拒绝意见：
+  - WSL Claude P2：中转 chrony/chronyd 单元选择冲突，拒绝作为本轮修复。Codex 复核认为 Debian/Ubuntu 常见 `chrony.service`、RHEL 系常见 `chronyd.service` 均已覆盖；双 unit 同时存在且 `chrony.service` 不可用属于非典型场景，需实机证据后再改。
+  - WSL Claude P3：中转健康检查硬编码 `LISTEN_PORT=443`，拒绝。本项目中转入口架构固定 TCP 443，健康检查注释也明确固定 443，单独改这里会制造“可配置端口”的错误暗示。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 删除落地安装 acme.sh 后的 `--upgrade --auto-upgrade`，保持已由固定 URL+sha256 校验的 acme.sh 3.0.8。
+  - 在 `_acme_hash` 附近补充维护注释，要求升级 acme.sh 时同步更新 URL、解压目录名和 tarball sha256。
+  - 两脚本版本统一提升到 `v5.94`；中转脚本仅同步版本号，中转业务逻辑不变。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `shellcheck -S error install_transit.sh install_landing.sh`
+  - `git ls-files --eol`
+  - `git diff --check`
+  - `rg -n 'auto-upgrade|v5.93|Chained-Proxy|install_transit \\(1\\)|install_landing \\(1\\)' README.md guides install_transit.sh install_landing.sh`
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 实机安装、Cloudflare DNS-01 申请、acme.sh 实际安装版本检查或证书续期实测。
+- Commit:
+  - 本次三轮合并提交：`fix: harden landing transaction recovery v5.96`
+
+## 2026-05-22 第 5 轮 - v5.95
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决 v5.94 新审查意见，优先修复落地首装端口暴露窗口、同域名证书失败误清理、删除节点中断状态分裂和额外端口解析漏项。
+- 接受意见：
+  - WSL Codex P0：落地 `fresh_install()` 先 `create_systemd_service` 启动 Xray、后 `setup_firewall`，在干净 VPS 默认 INPUT 放行时存在落地代理端口短暂全网暴露窗口。
+  - WSL Codex P1：新增同域名节点时，如果证书申请失败，失败清理会误删该域名既有节点仍在使用的证书目录和 acme 登记。
+  - WSL Codex P1：`delete_node()` 的中断 trap 未恢复 `config.json` 快照，可能在节点文件恢复后留下删除后的 Xray 配置。
+  - WSL Codex P2：`extra_ports_lines()` 使用 `read -a` 只读取第一行，无头 `EXTRA_PORTS` 包含换行时会漏放 1Panel/Docker 额外端口。
+- 改写后接受：
+  - WSL Claude P1：落地 chrony 单元选择与中转脚本不一致，改为同中转一样在 `chronyd.service` 后再检查 `chrony.service`，优先适配 Debian/Ubuntu 常见单元。
+- 拒绝意见：
+  - WSL Claude P1：`_fallback_blackhole_ok()` 缺少显式 `return` 会始终返回 0，拒绝。Bash 函数默认返回最后一条命令状态，`timeout ... </dev/tcp/...` 失败时函数会返回非 0；该项是语言规则误读。
+  - WSL Claude P2：acme.sh 解压目录名额外内联注释，暂缓。v5.94 已在 URL/hash 附近写明 URL、解压目录名和 sha256 必须同步更新，本轮优先处理真实行为风险。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地首装顺序调整为 `sync_xray_config` 后先 `setup_firewall`、再 `create_systemd_service`，避免 Xray 先监听而防火墙尚未收敛。
+  - 新增同域名节点时，若已有提交节点引用该域名，证书申请前快照既有证书目录和 acme 域名目录；失败时恢复快照并保留旧节点证书。
+  - `delete_node()` 中断回滚恢复 `LANDING_CONF` 快照，并把快照保留到防火墙更新和服务重启成功后再删除。
+  - `extra_ports_lines()` 改为按空格、Tab、CR、LF 统一拆行，修复无头多行额外端口漏放。
+  - 落地 chrony 单元选择逻辑对齐中转脚本；两脚本版本统一提升到 `v5.95`，中转脚本仅同步版本号。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git ls-files --eol`
+  - `git diff --check`
+  - `rg -n 'v5.94|v5.95|auto-upgrade|create_systemd_service|setup_firewall|extra_ports_lines|_snap_cfg_del|_existing_domain_refs|chrony.service' install_landing.sh install_transit.sh README.md guides/main_writer_task_guide.md guides/reviewer_task_guide.md JiLu.md`
+- 残留风险：
+  - 已做静态验证，未做 Debian 12 实机首装、iptables 真实链路验证、同域名证书失败恢复实测、删除节点中断注入实测或 1Panel/Docker 端口实测。
+- Commit:
+  - 本次三轮合并提交：`fix: harden landing transaction recovery v5.96`
+
+## 2026-05-22 第 6 轮 - v5.96
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决 v5.95 新审查意见，补齐落地额外端口持久化、删除事务自愈和新增节点证书半状态清理。
+- 接受意见：
+  - WSL Codex P1：`extra_ports_lines()` 能拆多行，但 `manager.conf` 仍可能写入多行 `EXTRA_PORTS`，`load_manager_config()` 只读取第一行，导致无头多行额外端口持久化后漏放。
+  - WSL Codex P1：`delete_node()` 使用 `.conf.deleting` 抵抗 SIGKILL，但启动自愈未恢复孤儿 `.conf.deleting`，会让节点从管理视图消失。
+  - WSL Codex P1：同域名证书失败恢复使用 `cp -a ... || true`，恢复失败会静默丢掉旧证书目录。
+  - WSL Codex P2：`add_node()` 证书申请成功后到事务 rollback trap 注册前仍有半状态窗口，早期 `mktemp/cat/chmod` 失败会留下无节点引用的新证书/acme 登记。
+  - WSL Codex 精简建议：删除落地证书申请循环中未使用的 `_force_opt`，删除防火墙重复 IP 提示中未读取的 `_dup_found`。
+- 改写后接受：
+  - 额外端口拆分未使用 `tr ' \t\r'` 字面写法，改为 `tr '[:space:]' '\n'`，同时新增 `normalize_extra_ports()`，统一把空格、Tab、CR、LF 分隔输入规范为单行再写入配置。
+- 拒绝意见：
+  - WSL Claude P1：add/delete 并发导致同域名证书引用计数过期，拒绝。本脚本 `add_node()` 和 `delete_node()` 均在写操作前 `_acquire_lock`，证书申请期间锁未释放，另一个脚本实例无法并发删除节点。
+  - WSL Claude P2：chrony/chronyd 改成 `if/elif` 优先 chronyd，拒绝。当前逻辑故意在两者都存在时选择 Debian/Ubuntu 常见 `chrony.service`，与用户 Debian 12 优先环境一致。
+  - WSL Claude P2：把 `extra_ports_lines()` 改成 awk RS 正则，拒绝。`tr '[:space:]' '\n' | sed '/^$/d'` 更直观，且已验证可处理空格、Tab、CR、LF。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 新增 `normalize_extra_ports()`，读取和保存 `manager.conf` 前把额外端口规范成单行，避免多行无头输入持久化后只读取第一行。
+  - `extra_ports_lines()` 改用 `[:space:]` 字符类拆分，覆盖空格、Tab、CR、LF。
+  - `add_node()` 在证书成功后立即设置早期中断清理，早期失败会删除临时节点、暂存 manager.conf，并按引用计数清理或保留证书。
+  - 同域名证书失败恢复改为 `mv` 快照硬恢复；恢复失败时保留快照并报错，不再静默吞掉失败。
+  - 启动时发现孤儿 `*.conf.deleting` 会恢复为 `*.conf`，随后重建 Xray 配置、防火墙并尝试重启服务。
+  - 删除 `_force_opt` 和 `_dup_found` 两个无效变量。
+  - 两脚本版本统一提升到 `v5.96`；中转脚本仅同步版本号。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git ls-files --eol`
+  - `git diff --check`
+  - `normalize_extra_ports` 最小复现：`10086\n8080  8443\t9000\r9443` 规范为 `10086 8080 8443 9000 9443`
+  - `rg -n 'v5\.9[0-9]|VERSION=|当前版本|install_transit_v|install_landing_v' install_transit.sh install_landing.sh README.md guides/main_writer_task_guide.md guides/reviewer_task_guide.md JiLu.md`
+- 残留风险：
+  - 已做静态验证和最小解析复现，未做 Debian 12 实机首装、iptables 真实链路验证、Cloudflare DNS-01 申请、`.conf.deleting` SIGKILL 注入恢复或同域名证书恢复故障注入。
+- Commit:
+  - 本次三轮合并提交：`fix: harden landing transaction recovery v5.96`

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v5.93.sh — 落地机安装脚本 v5.93
+# install_landing_v5.96.sh — 落地机安装脚本 v5.96
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v5.93: 精简公网 IPv4 获取冗余 RETURN trap，并消除管理菜单递归栈增长。
+# v5.96: 修复额外端口多行持久化、.deleting 自愈和 add_node 证书半状态清理。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v5.93"
+readonly VERSION="v5.96"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -200,12 +200,13 @@ load_manager_config(){
   [[ -n "$cu" ]] && CREATED_USER="$cu" || CREATED_USER="0"
   [[ -n "$ah" ]] && ACME_HOME="$ah" || ACME_HOME="${LANDING_BASE}/acme"
   [[ -n "$bc" ]] && BIND_IP="$bc" || BIND_IP="0.0.0.0"
-  EXTRA_PORTS="${ep:-}"
+  EXTRA_PORTS="$(normalize_extra_ports "${ep:-}")"
   _validate_internal_ports_in_use
 }
 
 save_manager_config(){
   mkdir -p "$MANAGER_BASE"
+  EXTRA_PORTS="$(normalize_extra_ports "${EXTRA_PORTS:-}")"
   atomic_write "$MANAGER_CONFIG" 600 root:root <<MCEOF
 LANDING_PORT=${LANDING_PORT}
 VLESS_UUID=${VLESS_UUID}
@@ -324,12 +325,11 @@ validate_port(){
 }
 
 extra_ports_lines(){
-  local input="${1:-}" old_ifs="$IFS"
-  local -a ports=()
-  IFS=$' \t\n'
-  read -r -a ports <<< "$input"
-  IFS="$old_ifs"
-  printf '%s\n' "${ports[@]}"
+  printf '%s\n' "${1:-}" | tr '[:space:]' '\n' | sed '/^$/d'
+}
+
+normalize_extra_ports(){
+  extra_ports_lines "${1:-}" | paste -sd' ' -
 }
 
 validate_password(){
@@ -451,6 +451,7 @@ check_deps(){
   if command -v chronyc &>/dev/null; then
     local _chrony_unit="chrony"
     systemctl list-unit-files chronyd.service 2>/dev/null | grep -q '^chronyd\.service' && _chrony_unit="chronyd"
+    systemctl list-unit-files chrony.service 2>/dev/null | grep -q '^chrony\.service' && _chrony_unit="chrony"
     systemctl enable --now "$_chrony_unit" 2>/dev/null || die "${_chrony_unit} 启动失败"
     chronyc makestep 2>/dev/null || warn "时间强制同步失败"
     sleep 3
@@ -934,7 +935,8 @@ PY
   if [[ ! -f "${ACME_HOME}/acme.sh" ]]; then
     local _acme_tmp_home="${LANDING_BASE}/.acme-home"
     mkdir -p "${_acme_tmp_home}" "${ACME_HOME}"
-    # R-21 CRITICAL: Download from GitHub release with sha256 checksum verification
+    # R-21 CRITICAL: Download from GitHub release with sha256 checksum verification.
+    # 升级 acme.sh 时必须同时更新 URL、解压目录名和该 URL 对应 tarball 的 sha256。
     local _acme_url="https://github.com/acmesh-official/acme.sh/archive/refs/tags/3.0.8.tar.gz"
     local _acme_hash="51f4f9580e91b038a7dd0207631bf9b1be0aab6a0094d0a3cbb4b21cd86f71df"
     local _acme_tarball="${_acme_tmp_home}/acme.sh-3.0.8.tar.gz"
@@ -956,7 +958,7 @@ PY
     [[ -f "${ACME_HOME}/acme.sh" ]]       || die "acme.sh 安装后在 ${ACME_HOME} 未找到 acme.sh，请检查安装器是否支持 --home"
     [[ -f "${ACME_HOME}/dnsapi/dns_cf.sh" ]]       || die "acme.sh 安装后缺少 dns_cf.sh 插件，请检查: ls ${ACME_HOME}/dnsapi/"
     env ACME_HOME="${ACME_HOME}" "${ACME_HOME}/acme.sh"       --set-default-ca --server letsencrypt 2>/dev/null       || warn "set-default-ca letsencrypt 失败（acme.sh 版本过旧？），将使用默认 CA，建议升级 acme.sh"
-    "${ACME_HOME}/acme.sh" --upgrade --auto-upgrade 2>/dev/null || true
+    # 保持已校验的固定版本；不执行自动升级，避免安装后漂移到未由脚本校验的版本。
   fi
   export PATH="${ACME_HOME}:${PATH}"
 
@@ -966,8 +968,6 @@ PY
 rm -rf "${ACME_HOME}/${domain}_ecc" 2>/dev/null || true
 local issued=0
 for try in 1 2; do
-    local _force_opt=""
-    (( try > 1 )) && _force_opt=""
     # [BUG-14 FIX] 移除第一次尝试前的DNS等待 - acme.sh会自己创建TXT记录
     # [BUG-16 FIX] 将dnssleep从0改为60 - Cloudflare DNS传播需要时间
     CF_Token="$cf_token" "${ACME_HOME}/acme.sh" --home "${ACME_HOME}" --issue --dns dns_cf \
@@ -1749,12 +1749,11 @@ setup_firewall(){
     die "防火墙构建中止：${skipped} 个节点文件格式异常，拒绝生成可能放行不足的规则集（预期 ${#_conf_files[@]}，有效 $(( ${#_conf_files[@]} - skipped ))）"
   fi
   # [R14 Fix] Warn about duplicate transit IPs (multiple domains on same transit is normal)
-  local _seen_ips=() _dup_found=0
+  local _seen_ips=()
   for _tip in "${tips[@]}"; do
     for _seen in "${_seen_ips[@]}"; do
       if [[ "$_seen" == "$_tip" ]]; then
         warn "检测到重复的中转IP: $_tip（多个域名共享同一中转机，正常）"
-        _dup_found=1
         break
       fi
     done
@@ -2244,14 +2243,55 @@ SMEOF
   fi
 
   setup_fallback_decoy
-  if ! ( issue_certificate "$NEW_DOMAIN" "$USE_CF_TOKEN" ); then
-    if [[ -f "${ACME_HOME}/acme.sh" ]]; then
-      "${ACME_HOME}/acme.sh" --home "${ACME_HOME}" --remove --domain "${NEW_DOMAIN}" --ecc 2>/dev/null || true
-      rm -rf "${CERT_BASE:?}/${NEW_DOMAIN:?}" 2>/dev/null || true
+  local _existing_domain_refs=0 _cert_snap_dir="" _acme_snap_dir=""
+  if [[ -d "${MANAGER_BASE}/nodes" ]]; then
+    _existing_domain_refs=$(find "${MANAGER_BASE}/nodes" -name "*.conf" -not -name ".tmp-node-*.conf" -type f \
+      -exec grep -l "^DOMAIN=${NEW_DOMAIN}$" {} + 2>/dev/null | wc -l)
+  fi
+  if (( _existing_domain_refs > 0 )); then
+    if [[ -d "${CERT_BASE}/${NEW_DOMAIN}" ]]; then
+      _cert_snap_dir=$(mktemp -d "${MANAGER_BASE}/tmp/.cert-${NEW_DOMAIN//./_}.XXXXXX") \
+        || die "mktemp _cert_snap_dir failed"
+      cp -a "${CERT_BASE}/${NEW_DOMAIN}/." "$_cert_snap_dir/" \
+        || die "snapshot existing cert dir failed"
     fi
+    if [[ -d "${ACME_HOME}/${NEW_DOMAIN}_ecc" ]]; then
+      _acme_snap_dir=$(mktemp -d "${MANAGER_BASE}/tmp/.acme-${NEW_DOMAIN//./_}.XXXXXX") \
+        || die "mktemp _acme_snap_dir failed"
+      cp -a "${ACME_HOME}/${NEW_DOMAIN}_ecc/." "$_acme_snap_dir/" \
+        || die "snapshot existing acme dir failed"
+    fi
+  fi
+  if ! ( issue_certificate "$NEW_DOMAIN" "$USE_CF_TOKEN" ); then
+    if (( _existing_domain_refs > 0 )); then
+      warn "证书申请失败，保留 ${NEW_DOMAIN} 既有证书：仍被 ${_existing_domain_refs} 个已提交节点引用"
+      if [[ -n "$_cert_snap_dir" && -d "$_cert_snap_dir" ]]; then
+        rm -rf "${CERT_BASE:?}/${NEW_DOMAIN:?}" 2>/dev/null || true
+        if ! mv -f "$_cert_snap_dir" "${CERT_BASE}/${NEW_DOMAIN}" 2>/dev/null; then
+          _release_lock
+          die "恢复 ${NEW_DOMAIN} 既有证书失败，快照仍保留在: ${_cert_snap_dir}"
+        fi
+        _cert_snap_dir=""
+      fi
+      if [[ -n "$_acme_snap_dir" && -d "$_acme_snap_dir" ]]; then
+        rm -rf "${ACME_HOME:?}/${NEW_DOMAIN:?}_ecc" 2>/dev/null || true
+        if ! mv -f "$_acme_snap_dir" "${ACME_HOME}/${NEW_DOMAIN}_ecc" 2>/dev/null; then
+          _release_lock
+          die "恢复 ${NEW_DOMAIN} acme 登记失败，快照仍保留在: ${_acme_snap_dir}"
+        fi
+        _acme_snap_dir=""
+      fi
+    else
+      if [[ -f "${ACME_HOME}/acme.sh" ]]; then
+        "${ACME_HOME}/acme.sh" --home "${ACME_HOME}" --remove --domain "${NEW_DOMAIN}" --ecc 2>/dev/null || true
+        rm -rf "${CERT_BASE:?}/${NEW_DOMAIN:?}" 2>/dev/null || true
+      fi
+    fi
+    rm -rf "${_cert_snap_dir:-}" "${_acme_snap_dir:-}" 2>/dev/null || true
     rm -f "${_staged_mgr:-}" 2>/dev/null || true
     _release_lock; die "证书申请或安装失败，新增节点已取消"
   fi
+  rm -rf "${_cert_snap_dir:-}" "${_acme_snap_dir:-}" 2>/dev/null || true
   local PUB_IP="${PUB_IP:-}"
   [[ -n "$PUB_IP" ]] || PUB_IP=$(get_public_ip)
 
@@ -2259,18 +2299,6 @@ SMEOF
   local _safe_dom; _safe_dom=$(printf '%s' "$NEW_DOMAIN" | tr '.:/' '___')
   local _safe_ip;  _safe_ip=$(printf '%s' "$NEW_TRANSIT" | tr '.:' '__')
   local _node_conf="${MANAGER_BASE}/nodes/${_safe_dom}_${_safe_ip}.conf"
-
-  # 临时节点用隐藏前缀，只通过 _TMP_NODE_PATH 显式加入本轮事务。
-  local _tmp_node; _tmp_node=$(mktemp "${MANAGER_BASE}/nodes/.tmp-node-XXXXXX.conf") \
-    || die "mktemp _tmp_node failed — MANAGER_BASE/nodes missing or disk full"
-  cat >"$_tmp_node" <<NEOF_TMP
-DOMAIN=${NEW_DOMAIN}
-PASSWORD=${NEW_PASS}
-TRANSIT_IP=${NEW_TRANSIT}
-PUBLIC_IP=${PUB_IP}
-CREATED=$(date +%Y%m%d_%H%M%S)
-NEOF_TMP
-  chmod 600 "$_tmp_node"
 
   # [F1] Ghost cert guard: check if other committed node files still use this domain.
   # Revoking a cert shared by multiple transit nodes would break live connections on all of them.
@@ -2287,16 +2315,37 @@ NEOF_TMP
       fi
     fi
   }
+  local _tmp_node="" _snap_cfg_node="" _snap_existing_node=""
+  _cancel_add_node_before_trap(){
+    local _msg="${1:-新增节点失败，已清理证书半状态}"
+    rm -f "${_tmp_node:-}" "${_staged_mgr:-}" 2>/dev/null || true
+    _acme_node_cleanup
+    trap - INT TERM
+    _release_lock
+    die "$_msg"
+  }
+  trap '_cancel_add_node_before_trap "新增节点中断，已清理证书半状态"' INT TERM
 
-  local _snap_cfg_node; _snap_cfg_node=$(mktemp "${LANDING_BASE}/.snap-recover.XXXXXX" 2>/dev/null) \
-    || die "mktemp _snap_cfg_node failed"
+  # 临时节点用隐藏前缀，只通过 _TMP_NODE_PATH 显式加入本轮事务。
+  _tmp_node=$(mktemp "${MANAGER_BASE}/nodes/.tmp-node-XXXXXX.conf") \
+    || _cancel_add_node_before_trap "mktemp _tmp_node failed — MANAGER_BASE/nodes missing or disk full"
+  cat >"$_tmp_node" <<NEOF_TMP || _cancel_add_node_before_trap "临时节点写入失败，新增节点已取消"
+DOMAIN=${NEW_DOMAIN}
+PASSWORD=${NEW_PASS}
+TRANSIT_IP=${NEW_TRANSIT}
+PUBLIC_IP=${PUB_IP}
+CREATED=$(date +%Y%m%d_%H%M%S)
+NEOF_TMP
+  chmod 600 "$_tmp_node" || _cancel_add_node_before_trap "临时节点权限设置失败，新增节点已取消"
+
+  _snap_cfg_node=$(mktemp "${LANDING_BASE}/.snap-recover.XXXXXX" 2>/dev/null) \
+    || _cancel_add_node_before_trap "mktemp _snap_cfg_node failed"
   [[ -n "$_snap_cfg_node" && -f "$LANDING_CONF" ]] && cp -f "$LANDING_CONF" "$_snap_cfg_node" 2>/dev/null || true
-  local _snap_existing_node=""
   [[ -f "$_node_conf" ]] && {
     _snap_existing_node=$(mktemp "${MANAGER_BASE}/nodes/.snap-recover.XXXXXX" 2>/dev/null) \
-      || die "mktemp _snap_existing_node failed"
+      || _cancel_add_node_before_trap "mktemp _snap_existing_node failed"
     cp -f "$_node_conf" "$_snap_existing_node" \
-      || die "snapshot existing node failed"
+      || _cancel_add_node_before_trap "snapshot existing node failed"
   }
   _rollback_add_node(){
     rm -f "$_tmp_node" "${_staged_mgr:-}" 2>/dev/null || true
@@ -2434,6 +2483,9 @@ delete_node(){
   _delete_node_rollback(){
     [[ "${__delete_node_trap_active:-0}" == "1" ]] || return 0
     mv -f "${DEL_CONF}.deleting" "$DEL_CONF" 2>/dev/null || true
+    [[ -n "${_snap_cfg_del:-}" && -f "${_snap_cfg_del:-}" ]] \
+      && mv -f "$_snap_cfg_del" "$LANDING_CONF" 2>/dev/null || true
+    ( setup_firewall ) 2>/dev/null || true
     rm -f "$_snap_node" "${_snap_cfg_del:-}" 2>/dev/null || true
     __delete_node_trap_active=0
     _release_lock
@@ -2457,11 +2509,10 @@ delete_node(){
       && mv -f "$_snap_cfg_del" "$LANDING_CONF" 2>/dev/null || true
     _release_lock; die "Xray配置同步失败，节点文件和config.json已物理回滚"
   fi
-  rm -f "${_snap_cfg_del:-}" 2>/dev/null || true  # sync succeeded, snapshot no longer needed
   if ! ( setup_firewall ); then
     mv -f "${DEL_CONF}.deleting" "$DEL_CONF" 2>/dev/null || true
-    # [F1] Re-sync after node restore (sync succeeded before, safe to re-run)
-    ( sync_xray_config ) 2>/dev/null || true
+    [[ -n "${_snap_cfg_del:-}" && -f "${_snap_cfg_del:-}" ]] \
+      && mv -f "$_snap_cfg_del" "$LANDING_CONF" 2>/dev/null || true
     _release_lock; die "防火墙更新失败，节点文件已恢复"
   fi
   # v2.33 BUG-NEW: _snap_node 保留到 restart 验证通过后再删，保证重启失败时可回滚
@@ -2471,7 +2522,8 @@ delete_node(){
   if (( _restart_rc != 0 )) || ! systemctl is-active --quiet "$LANDING_SVC"; then
     warn "服务重启失败，回滚节点文件..."
     mv -f "${DEL_CONF}.deleting" "$DEL_CONF" 2>/dev/null || true
-    ( sync_xray_config ) 2>/dev/null || true
+    [[ -n "${_snap_cfg_del:-}" && -f "${_snap_cfg_del:-}" ]] \
+      && mv -f "$_snap_cfg_del" "$LANDING_CONF" 2>/dev/null || ( sync_xray_config ) 2>/dev/null || true
     ( setup_firewall )   2>/dev/null || true
     # [Doc7-🔴] 回滚后必须恢复服务运行态，否则剩余所有节点永久断流直到人工介入
     systemctl reset-failed "$LANDING_SVC" 2>/dev/null || true
@@ -2490,7 +2542,7 @@ delete_node(){
       rm -rf "${CERT_BASE:?}/${DEL_DOMAIN:?}" 2>/dev/null || true
     fi
     # Both _snap_node and .deleting can now be removed — transaction succeeded
-    rm -f "$_snap_node" "${DEL_CONF}.deleting" 2>/dev/null || true
+    rm -f "$_snap_node" "${_snap_cfg_del:-}" "${DEL_CONF}.deleting" 2>/dev/null || true
     __delete_node_trap_active=0
     trap - INT TERM ERR
     _release_lock
@@ -3322,6 +3374,8 @@ fresh_install(){
     done
   fi
 
+  EXTRA_PORTS="$(normalize_extra_ports "${EXTRA_PORTS:-}")"
+
   if (( _headless )); then
     CONFIRM="y"
   else
@@ -3494,7 +3548,7 @@ fresh_install(){
   mkdir -p "${MANAGER_BASE}/tmp"
 
   # [v2.8 Architect-🔴] Stage manager.conf to a temp path; promote to the real path only after
-  # sync_xray_config + create_systemd_service + setup_firewall all succeed.
+  # sync_xray_config + setup_firewall + create_systemd_service all succeed.
   local _staged_fi_mgr; _staged_fi_mgr=$(mktemp "${MANAGER_BASE}/tmp/.manager.XXXXXX") \
     || die "mktemp _staged_fi_mgr failed — MANAGER_BASE/tmp missing or disk full"
   atomic_write "$_staged_fi_mgr" 600 root:root <<SMFI
@@ -3527,6 +3581,18 @@ SMFI
   ( export _TMP_NODE_PATH="$_tmp_node" _STAGED_MANAGER_CONFIG="$_staged_fi_mgr"; sync_xray_config )
 
   setup_health_check      # [S1-HIGH] 配置健康检查
+  # 先提交防火墙，再启动 Xray，避免干净 VPS 默认放行 INPUT 时出现代理端口全网暴露窗口。
+  if ! ( export _TMP_NODE_PATH="$_tmp_node" _STAGED_MANAGER_CONFIG="$_staged_fi_mgr"; setup_firewall ); then
+    rm -f "$_tmp_node" "$_final_node" "${_staged_fi_mgr:-}" 2>/dev/null || true
+    rm -f /etc/cron.d/xray-landing-health /usr/local/bin/xray-landing-health-check.sh 2>/dev/null || true
+    # [F1] Ghost cert guard: cert was issued before firewall; must revoke on firewall fail
+    if [[ -f "${ACME_HOME}/acme.sh" ]]; then
+      "${ACME_HOME}/acme.sh" --home "${ACME_HOME}" --remove --domain "$DOMAIN" --ecc 2>/dev/null || true
+      rm -rf "${CERT_BASE:?}/${DOMAIN:?}" 2>/dev/null || true
+    fi
+    _fresh_install_rollback; exit 1
+  fi
+
   if ! ( create_systemd_service ); then
     if [[ -f "${ACME_HOME}/acme.sh" ]]; then
       "${ACME_HOME}/acme.sh" --home "${ACME_HOME}" --remove --domain "$DOMAIN" --ecc 2>/dev/null || true
@@ -3534,25 +3600,6 @@ SMFI
     fi
     rm -f "$_tmp_node" "$_final_node" "${_staged_fi_mgr:-}" 2>/dev/null || true
     rm -f /etc/cron.d/xray-landing-health /usr/local/bin/xray-landing-health-check.sh 2>/dev/null || true
-    _fresh_install_rollback; exit 1
-  fi
-
-  # v2.32 GPT: setup_firewall 失败时完整回滚——节点文件/config.json/服务/unit/logrotate 全部清理，
-  # 确保下次重跑不遇到"看似未装实已半装"的脏状态
-  if ! ( export _TMP_NODE_PATH="$_tmp_node" _STAGED_MANAGER_CONFIG="$_staged_fi_mgr"; setup_firewall ); then
-    rm -f "$_tmp_node" "$_final_node" "${_staged_fi_mgr:-}" 2>/dev/null || true
-    systemctl stop    "$LANDING_SVC" 2>/dev/null || true
-    systemctl disable "$LANDING_SVC" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${LANDING_SVC}" 2>/dev/null || true
-    rm -f "$LOGROTATE_FILE" 2>/dev/null || true
-    rm -f /etc/cron.d/xray-landing-health /usr/local/bin/xray-landing-health-check.sh 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-    ( sync_xray_config ) 2>/dev/null || true
-    # [F1] Ghost cert guard: cert was issued before firewall; must revoke on firewall fail
-    if [[ -f "${ACME_HOME}/acme.sh" ]]; then
-      "${ACME_HOME}/acme.sh" --home "${ACME_HOME}" --remove --domain "$DOMAIN" --ecc 2>/dev/null || true
-      rm -rf "${CERT_BASE:?}/${DOMAIN:?}" 2>/dev/null || true
-    fi
     _fresh_install_rollback; exit 1
   fi
 
@@ -3608,6 +3655,29 @@ main(){
   mkdir -p "${MANAGER_BASE}/tmp" 2>/dev/null || true
   _check_update >"$UPDATE_WARN_FILE" 2>&1 &
   UPDATE_CHECK_PID=$!
+
+  if [[ -f "$INSTALLED_FLAG" && -d "${MANAGER_BASE}/nodes" ]]; then
+    local _recovered_deleting=0 _del_file _base_conf
+    while IFS= read -r _del_file; do
+      [[ -f "$_del_file" ]] || continue
+      _base_conf="${_del_file%.deleting}"
+      if [[ -f "$_base_conf" ]]; then
+        warn "发现孤儿删除事务文件 ${_del_file}，正式节点仍存在，清理孤儿文件..."
+        rm -f "$_del_file" 2>/dev/null || true
+      else
+        warn "发现未完成删除事务 ${_del_file}，恢复节点文件..."
+        mv -f "$_del_file" "$_base_conf" \
+          || die "恢复未完成删除事务失败: ${_del_file}"
+        _recovered_deleting=1
+      fi
+    done < <(find "${MANAGER_BASE}/nodes" -maxdepth 1 -name "*.conf.deleting" -type f 2>/dev/null | sort)
+    if (( _recovered_deleting )); then
+      load_manager_config
+      sync_xray_config || die "恢复 .deleting 节点后同步 Xray 配置失败，拒绝进入管理菜单"
+      setup_firewall  || die "恢复 .deleting 节点后同步防火墙失败，拒绝进入管理菜单"
+      systemctl restart "$LANDING_SVC" 2>/dev/null || warn "恢复 .deleting 节点后服务重启失败，请检查: journalctl -u ${LANDING_SVC}"
+    fi
+  fi
 
   # [v2.9 Grok-A-🟠] Symmetric reconciliation: "flag absent but durable set complete" means
   # the process was killed between touch INSTALLED_FLAG and mv staged_fi_mgr (v2.9 order) or

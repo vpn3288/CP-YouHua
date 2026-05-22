@@ -2,7 +2,7 @@
 
 本仓库用于 `install_transit.sh` 与 `install_landing.sh` 的多 AI 循环审查、精简和长期稳定性优化。
 
-当前版本：`v5.93`
+当前版本：`v5.96`
 
 开工前必须先读：
 
