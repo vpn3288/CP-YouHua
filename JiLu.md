@@ -375,3 +375,124 @@
   - 已做静态验证，未做 Debian 12 实机首装、旧 `manager.conf` 故障注入、Cloudflare DNS-01 申请中断注入、iptables 真实链路验证或 1Panel/Docker 端口实测。
 - Commit:
   - 本次三轮合并提交：`fix: harden landing install recovery v5.99`
+
+## 2026-05-22 第 10 轮 - v6.00
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：裁决 v5.99 新审查意见，统一两脚本端口前导零防护，提前拦截落地旧配置 UUID 损坏，并做低风险重复校验精简。
+- 接受意见：
+  - WSL Claude P1 / WSL Codex P2：中转 `validate_port()` 仍允许 `0443`、`0100000` 等前导零端口；导入 token 后可能造成 meta 展示、Bash 算术和 Nginx 端口解释不一致。
+  - WSL Codex P1：落地 fresh install 复用旧 `manager.conf` 时只检查 UUID 非空，格式错误会等到回滚 trap 激活后才由 `load_manager_config()` 报错，扩大误删旧状态风险。
+  - WSL Codex P3：`setup_firewall()` 和 `_persist_iptables()` 在 `validate_extra_ports_or_die()` 后重复做端口格式判断，属于低收益维护分叉。
+  - WSL Codex P3：主笔指南中的远端提交、脚本行数和当前版本事实漂移，需要同步到当前 v6.00 工作区事实。
+- 暂缓意见：
+  - WSL Codex P2：落地卸载用旧 `nginx.conf.orig` 整体覆盖当前 `/etc/nginx/nginx.conf`，方向成立；但安全修复需要区分脚本标记行、用户后续修改和 1Panel/OpenResty 共存配置，本轮先不在未实机验证下扩大卸载路径复杂度。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转 `validate_port()` 改为拒绝前导零，并使用 `10#` 十进制范围检查，对齐落地脚本端口规则。
+  - 落地新增 `validate_uuid()`，`load_manager_config()` 和 fresh install 复用/生成 UUID 预检共用同一规则；非法 UUID 在 fresh rollback trap 激活前释放安装锁并退出。
+  - 落地额外端口防火墙运行态与持久化循环删除重复端口判断，依赖前置 `validate_extra_ports_or_die()` 的统一校验结果。
+  - 两脚本版本统一提升到 `v6.00`；README 和两份指南同步当前版本事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - 最小端口复现：`0443`、`0100000`、`0080`、`0`、`65536` 拒绝；`443`、`65535` 通过。
+  - 最小 UUID 复现：标准 UUID 通过；`bad`、含非十六进制字符 UUID、空值拒绝。
+- 残留风险：
+  - 已做静态验证和最小函数复现，未做 Debian 12 实机首装、旧 `manager.conf` 损坏注入、iptables 真实链路验证、Cloudflare DNS-01 申请或卸载 nginx 共存漂移验证。
+- Commit:
+  - 未提交；按“三轮真实优化后提交并推送”规则，暂定随第 12 轮合并提交，除非用户要求立即上传。
+
+## 2026-05-22 第 11 轮 - v6.01
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：审查 v6.00 未提交工作区，修复额外端口校验对 `set -e` 传播的隐性依赖，并清理指南中易漂移事实。
+- 接受意见：
+  - WSL Codex P3：`validate_extra_ports_or_die()` 直接调用 `validate_port "$_ep"`，在外层处于 `if ! ( setup_firewall )` 或类似会抑制 `errexit` 的上下文时，非法额外端口可能不会让函数失败；v6.00 删除循环内重复校验后，该隐患需要显式处理。
+  - WSL Codex P3：主笔指南中的脚本行数和 CRLF 表述属于易漂移事实，下一轮会误导工作区判断。
+- 拒绝意见：
+  - WSL Claude P2：fresh install 复用旧 UUID 后未立即预检，拒绝。当前 `install_landing.sh` 在复用或生成 UUID 后、`__LANDING_FRESH_INSTALL_TRAP_ACTIVE=1` 与 trap 注册前统一执行 `validate_uuid "$VLESS_UUID"`，非法旧 UUID 会在副作用窗口前释放锁并退出。
+  - WSL Claude P1/精简：中转 `validate_port()` 缺少范围检查或需改成落地单行风格，拒绝。当前中转函数已使用 `10#` 做 `1-65535` 范围检查；单行风格只是一致性偏好，没有真实行为收益。
+  - WSL Claude P2：额外端口空值守卫可增强，拒绝。`extra_ports_lines()` 已删除空行，循环内也保留 `[[ -n "$_ep" ]] || continue`，继续添加守卫没有实际收益。
+- 暂缓意见：
+  - WSL Codex 上轮 P2：落地卸载整体恢复旧 `nginx.conf.orig` 可能覆盖用户后续修改，继续暂缓；需要实机/配置漂移样例后再设计最小修复。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - `validate_extra_ports_or_die()` 改为 `validate_port "$_ep" || die ...`，非法额外端口会显式失败，不再依赖 `set -e` 在调用上下文中的传播。
+  - 主笔指南移除脚本行数，改为记录当前工作区已验证 LF；若未来 CRLF 复发并破坏 `bash -n`，仍按 P0 处理。
+  - 两脚本版本统一提升到 `v6.01`；中转脚本仅同步版本号，中转业务逻辑不变。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - 最小额外端口复现：在 `if ! ( validate_extra_ports_or_die "0080"; echo success )` 形态下，非法端口触发 `die` 并返回 failed，不再打印 success。
+- 残留风险：
+  - 已做静态验证和最小函数复现，未做 Debian 12 实机首装、iptables 真实链路验证、旧 `manager.conf` 损坏注入、Cloudflare DNS-01 申请或卸载 nginx 共存漂移验证。
+- Commit:
+  - 未提交；按“三轮真实优化后提交并推送”规则，暂定随第 12 轮合并提交，除非用户要求立即上传。
+
+## 2026-05-22 第 12 轮 - v6.02
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：审查 v6.01 未提交工作区，修复防火墙持久化函数在 `if ! func` 上下文中仍依赖 `errexit` 的事务风险，并完成第 10-12 轮合并提交推送。
+- 接受意见：
+  - WSL Codex P1：中转和落地 `_persist_iptables()` 仍有裸 `atomic_write`、`mkdir`、`systemctl` 和内部 `die`；函数由 `if ! _persist_iptables` 调用时，裸命令失败可能因 `errexit` 抑制而继续执行，内部 `die` 又会绕过调用者防火墙 rollback。
+  - WSL Codex P3：落地 `do_set_port()` 调用 `setup_firewall()` 已完成持久化，随后再次 `_persist_iptables "$(detect_ssh_port)"` 属于重复持久化，增加第二个失败点。
+- 拒绝意见：
+  - WSL Claude P3：健康检查脚本中 `LISTEN_PORT=443` 可删除，拒绝。本轮优先处理防火墙事务风险；该赋值在生成的独立健康检查脚本中保留明确运行时常量，收益不足以单独改动。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转 `_persist_iptables()` 对 `mkdir`、端口/链名校验、恢复脚本写入、systemd unit 写入、`daemon-reload`、`enable` 和 `is-enabled` 全部改为显式失败 `return 1`，由 `setup_firewall_transit()` 统一 rollback 和报错。
+  - 落地 `_persist_iptables()` 对 `mkdir`、额外端口校验、恢复脚本写入、systemd unit 写入、`daemon-reload`、`enable` 和 `is-enabled` 全部改为显式失败 `return 1`，由 `setup_firewall()` 统一 rollback 和报错。
+  - 落地新增非退出型 `validate_extra_ports()`，`validate_extra_ports_or_die()` 继续供安装/保存配置路径使用，`_persist_iptables()` 使用非退出型校验避免绕过调用者回滚。
+  - 删除 `do_set_port()` 中 `setup_firewall()` 成功后的重复 `_persist_iptables`，保留恢复服务 restart 验收。
+  - 两脚本版本统一提升到 `v6.02`；README 和两份指南同步当前版本事实。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash install_transit.sh --help`
+  - `bash install_landing.sh --help`
+  - `git diff --check`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh'`
+  - 最小 `if ! func` 复现：函数内部显式 `return 1` 时进入外层 rollback 分支，不再继续执行后续命令。
+- 残留风险：
+  - 已做静态验证和最小 Bash 语义复现，未做 Debian 12 实机首装、iptables 持久化失败注入、恢复 service 重启实测、Cloudflare DNS-01 申请或卸载 nginx 共存漂移验证。
+- Commit:
+  - 本次三轮合并提交：`fix: harden firewall persistence v6.02`

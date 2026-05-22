@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v5.99.sh — 落地机安装脚本 v5.99
+# install_landing_v6.02.sh — 落地机安装脚本 v6.02
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v5.99: 收紧 fresh install 回滚激活窗口，并拒绝前导零端口绕过互斥检查。
+# v6.02: 防火墙持久化失败显式返回，由调用者统一回滚。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v5.99"
+readonly VERSION="v6.02"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -235,7 +235,7 @@ load_manager_config(){
   bc=$(grep '^BIND_IP='         "$_cfg" 2>/dev/null | awk -F= '{sub(/^[^=]*=/,"",$0); print}' || true)
   ep=$(read_extra_ports_from_config "$_cfg")
   validate_port "$lp" || die "${_cfg} 损坏：LANDING_PORT='${lp:-<空>}' 非法"
-  [[ -n "$vu" && "$vu" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || die "${_cfg} 损坏：VLESS_UUID='${vu:-<空>}' 格式非法"
+  validate_uuid "$vu" || die "${_cfg} 损坏：VLESS_UUID='${vu:-<空>}' 格式非法"
 
   if [[ -n "${mvn:-}" && "$mvn" != "$VERSION" ]]; then
     if _ver_gt "$mvn" "$VERSION"; then
@@ -383,6 +383,11 @@ validate_port(){
   (( 10#$1 >= 1 && 10#$1 <= 65535 )) || { error "端口需在 1-65535: $1"; return 1; }
 }
 
+validate_uuid(){
+  [[ "${1:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] \
+    || { error "UUID 格式非法: ${1:-<空>}"; return 1; }
+}
+
 extra_ports_lines(){
   printf '%s\n' "${1:-}" | tr '[:space:]' '\n' | sed '/^$/d'
 }
@@ -391,14 +396,20 @@ normalize_extra_ports(){
   extra_ports_lines "${1:-}" | paste -sd' ' -
 }
 
-validate_extra_ports_or_die(){
+validate_extra_ports(){
   local _ports="${1:-}" _ep
   while IFS= read -r _ep; do
     [[ -n "$_ep" ]] || continue
-    validate_port "$_ep"
-    [[ "$_ep" != "${LANDING_PORT:-}" ]] \
-      || die "EXTRA_PORTS 不能包含落地代理端口 ${LANDING_PORT}，否则会把代理端口开放给全网"
+    validate_port "$_ep" || { error "EXTRA_PORTS 含非法端口: $_ep"; return 1; }
+    if [[ "$_ep" == "${LANDING_PORT:-}" ]]; then
+      error "EXTRA_PORTS 不能包含落地代理端口 ${LANDING_PORT}，否则会把代理端口开放给全网"
+      return 1
+    fi
   done < <(extra_ports_lines "$_ports")
+}
+
+validate_extra_ports_or_die(){
+  validate_extra_ports "${1:-}" || die "EXTRA_PORTS 校验失败"
 }
 
 extra_ports_contains(){
@@ -1854,15 +1865,13 @@ setup_firewall(){
   [[ -f "$_extra_cfg" ]] && _saved_extra=$(read_extra_ports_from_config "$_extra_cfg")
   [[ -n "$_saved_extra" ]] && _extra_ports="$_saved_extra"
   _extra_ports="$(normalize_extra_ports "$_extra_ports")"
-  validate_extra_ports_or_die "$_extra_ports"
+  validate_extra_ports "$_extra_ports" || _fw_die "额外端口校验失败"
   if [[ -n "$_extra_ports" ]]; then
     while IFS= read -r _ep; do
       [[ -n "$_ep" ]] || continue
-      if [[ "$_ep" =~ ^[0-9]+$ ]] && (( _ep >= 1 && _ep <= 65535 )); then
-        iptables -w 2 -A "$FW_TMP" -p tcp --dport "$_ep" -m comment --comment "xray-landing-extra" -j ACCEPT \
-          || _fw_die "添加额外端口 ${_ep} 放行规则失败"
-        info "  额外端口放行: $_ep"
-      fi
+      iptables -w 2 -A "$FW_TMP" -p tcp --dport "$_ep" -m comment --comment "xray-landing-extra" -j ACCEPT \
+        || _fw_die "添加额外端口 ${_ep} 放行规则失败"
+      info "  额外端口放行: $_ep"
     done < <(extra_ports_lines "$_extra_ports")
   fi
   local count=0
@@ -1947,7 +1956,7 @@ setup_firewall(){
 
 _persist_iptables(){
   local ssh_port="${1:-22}"
-  mkdir -p "$MANAGER_BASE"
+  mkdir -p "$MANAGER_BASE" || { error "mkdir ${MANAGER_BASE} failed"; return 1; }
   local fw_script="${MANAGER_BASE}/firewall-restore.sh"
   local transit_ips=()
   while IFS= read -r meta; do
@@ -1973,18 +1982,16 @@ _persist_iptables(){
   [[ -f "$_extra_cfg" ]] && _saved_extra=$(read_extra_ports_from_config "$_extra_cfg")
   [[ -n "$_saved_extra" ]] && _extra_ports="$_saved_extra"
   _extra_ports="$(normalize_extra_ports "$_extra_ports")"
-  validate_extra_ports_or_die "$_extra_ports"
+  validate_extra_ports "$_extra_ports" || return 1
   if [[ -n "$_extra_ports" ]]; then
     while IFS= read -r _ep; do
       [[ -n "$_ep" ]] || continue
-      if [[ "$_ep" =~ ^[0-9]+$ ]] && (( _ep >= 1 && _ep <= 65535 )); then
-        _transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW -p tcp --dport ${_ep} -m comment --comment 'xray-landing-extra' -j ACCEPT"$'\n'
-      fi
+      _transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW -p tcp --dport ${_ep} -m comment --comment 'xray-landing-extra' -j ACCEPT"$'\n'
     done < <(extra_ports_lines "$_extra_ports")
   fi
 
   export FW_SIG="$_fw_sig" SSH_PORT_FALLBACK="$ssh_port" FW_CHAIN FW_CHAIN6 LANDING_PORT TRANSIT_RULES="$_transit_rules"
-  python3 - <<'PY' | atomic_write "$fw_script" 700 root:root
+  python3 - <<'PY' | atomic_write "$fw_script" 700 root:root || return 1
 from pathlib import Path
 import os, sys
 
@@ -2126,7 +2133,7 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.stdout.write(template)
 PY
   local rsvc="/etc/systemd/system/xray-landing-iptables-restore.service"
-  atomic_write "$rsvc" 644 root:root <<RSTO
+  atomic_write "$rsvc" 644 root:root <<RSTO || return 1
 [Unit]
 Description=Restore iptables rules for xray-landing
 DefaultDependencies=no
@@ -2142,10 +2149,10 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 RSTO
   # [F5] daemon-reload must succeed for unit changes to take effect
-  systemctl daemon-reload     || die "daemon-reload 失败，systemd 图未更新"
+  systemctl daemon-reload     || { error "daemon-reload 失败，systemd 图未更新"; return 1; }
   # [Doc3-2] enable 失败意味着重启后规则丢失，属于静默时序炸弹，必须硬失败
-  systemctl enable xray-landing-iptables-restore.service     || die "iptables 持久化服务 enable 失败，重启后防火墙规则将丢失"
-  systemctl is-enabled --quiet xray-landing-iptables-restore.service     || die "iptables 持久化服务 enabled 状态验收失败"
+  systemctl enable xray-landing-iptables-restore.service     || { error "iptables 持久化服务 enable 失败，重启后防火墙规则将丢失"; return 1; }
+  systemctl is-enabled --quiet xray-landing-iptables-restore.service     || { error "iptables 持久化服务 enabled 状态验收失败"; return 1; }
   info "防火墙规则已写入: ${fw_script}（开机动态检测 SSH 端口，蓝绿恢复防半切换）"
 }
 
@@ -2749,7 +2756,6 @@ do_set_port(){
     die "防火墙更新失败，端口已回滚至 ${old_port}"
   fi
 
-  _persist_iptables "$(detect_ssh_port)"
   if ! systemctl restart xray-landing-iptables-restore.service 2>/dev/null; then
     warn "iptables 恢复服务重启失败，触发端口回滚..."
     _port_change_active=0
@@ -3619,6 +3625,10 @@ fresh_install(){
 		  if ! validate_port "$LANDING_PORT" 2>/dev/null; then
 		    _release_lock; _fresh_lock_acquired=0
 		    die "复用后的落地端口 ${LANDING_PORT} 非法，请检查旧 manager.conf"
+		  fi
+		  if ! validate_uuid "$VLESS_UUID" 2>/dev/null; then
+		    _release_lock; _fresh_lock_acquired=0
+		    die "复用或生成的 VLESS_UUID '${VLESS_UUID:-<空>}' 非法，请检查旧 manager.conf"
 		  fi
 		  if extra_ports_contains "$EXTRA_PORTS" "$LANDING_PORT"; then
 		    _release_lock; _fresh_lock_acquired=0

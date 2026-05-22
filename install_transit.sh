@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v5.99.sh — 中转机安装脚本 v5.99
+# install_transit_v6.02.sh — 中转机安装脚本 v6.02
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v5.99: 同步版本号；中转业务逻辑不变。
+# v6.02: 防火墙持久化失败显式返回，由调用者统一回滚。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v5.99"
+readonly VERSION="v6.02"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -248,12 +248,12 @@ _assert_no_proxy_core_transit(){
 
 validate_port(){
   local p="$1"
-  if ! [[ "$p" =~ ^[0-9]+$ ]]; then
-    error "端口必须是纯数字: $p"
+  if ! [[ "$p" =~ ^[1-9][0-9]*$ ]]; then
+    error "端口格式非法（不允许前导零）: $p"
     return 1
   fi
-  if ! (( p >= 1 && p <= 65535 )); then
-    error "端口范围非法 (1-65535): $p"
+  if ! (( 10#$p >= 1 && 10#$p <= 65535 )); then
+    error "端口需在 1-65535: $p"
     return 1
   fi
   return 0
@@ -1229,11 +1229,11 @@ _bulldoze_input_refs_t(){
 _persist_iptables(){
   local ssh_port="${1:-22}"
   # [R6 Fix] Validate ssh_port is numeric before template injection
-  [[ "$ssh_port" =~ ^[0-9]+$ ]] || die "SSH 端口非法（需为数字）: $ssh_port"
-  (( ssh_port >= 1 && ssh_port <= 65535 )) || die "SSH 端口超范围 (1-65535): $ssh_port"
+  [[ "$ssh_port" =~ ^[0-9]+$ ]] || { error "SSH 端口非法（需为数字）: $ssh_port"; return 1; }
+  (( ssh_port >= 1 && ssh_port <= 65535 )) || { error "SSH 端口超范围 (1-65535): $ssh_port"; return 1; }
   # [R22 Fix] Validate FW_CHAIN names contain only safe characters before template injection
-  [[ "$FW_CHAIN" =~ ^[A-Za-z0-9_-]+$ ]] || die "FW_CHAIN 含非法字符: $FW_CHAIN"
-  mkdir -p "$MANAGER_BASE"
+  [[ "$FW_CHAIN" =~ ^[A-Za-z0-9_-]+$ ]] || { error "FW_CHAIN 含非法字符: $FW_CHAIN"; return 1; }
+  mkdir -p "$MANAGER_BASE" || { error "mkdir ${MANAGER_BASE} failed"; return 1; }
   local fw_script="${MANAGER_BASE}/firewall-restore.sh"
   local _fw_sig="TRANSIT_FW_VERSION=${VERSION}_$(date +%Y%m%d)"
   # [BUG-7-FIX] 导出环境变量供Python脚本使用
@@ -1242,7 +1242,7 @@ _persist_iptables(){
   export FW_SIG="$_fw_sig"
   export SSH_PORT_FALLBACK="$ssh_port"
   export LISTEN_PORT
-  python3 - <<'PY' | atomic_write "$fw_script" 700 root:root
+  python3 - <<'PY' | atomic_write "$fw_script" 700 root:root || return 1
 import os, sys
 
 template = r"""#!/usr/bin/env bash
@@ -1338,7 +1338,7 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.stdout.write(template)
 PY
   local rsvc="/etc/systemd/system/transit-manager-iptables-restore.service"
-  atomic_write "$rsvc" 644 root:root <<RSTO
+  atomic_write "$rsvc" 644 root:root <<RSTO || return 1
 [Unit]
 Description=Restore iptables rules for transit-manager
 DefaultDependencies=no
@@ -1354,10 +1354,11 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 RSTO
   systemctl daemon-reload \
-    || die "systemctl daemon-reload failed — iptables-restore service unit may not load"
+    || { error "systemctl daemon-reload failed — iptables-restore service unit may not load"; return 1; }
   systemctl enable transit-manager-iptables-restore.service \
-    || die "iptables 持久化服务 enable 失败，重启后防火墙规则将丢失"
-  systemctl is-enabled --quiet transit-manager-iptables-restore.service     || die "iptables 持久化服务 enabled 状态验收失败"
+    || { error "iptables 持久化服务 enable 失败，重启后防火墙规则将丢失"; return 1; }
+  systemctl is-enabled --quiet transit-manager-iptables-restore.service \
+    || { error "iptables 持久化服务 enabled 状态验收失败"; return 1; }
 }
 
 # 原子提交路由（map + meta + nginx reload 三合一）
