@@ -975,3 +975,41 @@
   - 完整 DNS-01 成功路径需要一个已轮换且具备 `Zone:DNS:Edit + Zone:Zone:Read` 的测试 Token；聊天中暴露过的 GitHub/Cloudflare 密钥必须废弃并重新生成。
 - Commit:
   - `69bd5b3 fix: harden landing install rollback v6.14`
+
+## 2026-05-22 第 25 轮 - v6.15
+
+- 主笔：Codex/GPT-5.5
+- 审查者：WSL Codex/GPT-5.5；WSL Claude Code/Claude 4.7
+- 本轮目标：进入实机安装测试前，补齐本地安全不变量测试，并修复中转坏 token 在 headless/导入路径仍可能触发安装副作用的问题。
+- 接受意见：
+  - WSL Codex P1：中转 headless 首装检测到 `LANDING_TOKEN` 后，旧路径会先执行 `check_deps/install_nginx/init_nginx_stream/setup_firewall_transit`，最后才在 `add_landing_route()` 校验 token；坏 token 会产生不必要安装副作用。
+  - WSL Codex P2：中转 `--import` 的 v6.14 粗校验只看 Base64 形态，形如 Base64 但不可解码为 JSON 的坏 token 仍会进入 `check_deps`。
+  - WSL Claude P2：仓库缺少可重复的本地安全不变量测试入口，v6.14 的关键边界容易在后续修改中回归。
+- 拒绝意见：
+  - 不接受用本地静态测试替代 Debian 12 实机安装验证；本地测试只守住无副作用预检、版本一致、无密钥和回滚顺序等回归底线。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `tests/local_static_invariants.sh`
+  - `JiLu.md`
+- 真实改动：
+  - 新增 `extract_import_token_json_no_deps()`，在任何依赖安装前用系统基础 `base64` 解码 token，并最小校验 JSON 对象、`ip` 和 `dom` 字段。
+  - 中转 `--import` 在拿锁和调用 `import_token()` 前先执行无副作用 token 预解析。
+  - 中转 `fresh_install()` 在检测到 `LANDING_TOKEN` 时，先做无副作用 token 预解析，再进入自动确认、端口检查和 `check_deps`。
+  - 新增 `tests/local_static_invariants.sh`，本地检查 LF、`bash -n`、版本一致、无密钥样式、token 预解析、`FAKE_IP` 拒绝、Nginx 默认站点恢复顺序、自愈加锁和节点碰撞清理路径。
+  - 两脚本版本统一提升到 `v6.15`；落地脚本仅同步版本号，落地业务逻辑不变。
+- 验证：
+  - `bash tests/local_static_invariants.sh`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash -n tests/local_static_invariants.sh`
+  - `wsl -e sh -lc 'cd /mnt/c/Users/Newby/Documents/CP-YouHua && shellcheck -S error install_transit.sh install_landing.sh tests/local_static_invariants.sh'`
+  - `git diff --check`
+- 残留风险：
+  - 尚未处理两台实机 SSH host key 变化；实机测试前必须通过 VPS 控制台核对新 fingerprint 后再更新 `known_hosts`。
+  - 尚未使用已轮换的新 Cloudflare 最小权限 Token 跑 DNS-01 成功路径、节点连通、中转导入、卸载重装循环。
+- Commit:
+  - 本轮提交：`fix: prevalidate transit import token v6.15`

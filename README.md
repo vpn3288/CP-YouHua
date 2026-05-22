@@ -2,7 +2,7 @@
 
 本仓库用于 `install_transit.sh` 与 `install_landing.sh` 的多 AI 循环审查、精简和长期稳定性优化。
 
-当前版本：`v6.14`
+当前版本：`v6.15`
 
 开工前必须先读：
 
@@ -13,6 +13,10 @@
 
 - `install_transit.sh`
 - `install_landing.sh`
+
+本地静态不变量检查：
+
+- `bash tests/local_static_invariants.sh`
 
 第一轮真实优化已完成文件名规范化，并确认脚本以 LF 换行保存。
 

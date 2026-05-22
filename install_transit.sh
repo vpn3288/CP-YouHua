@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.14.sh — 中转机安装脚本 v6.14
+# install_transit_v6.15.sh — 中转机安装脚本 v6.15
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.14: 导入 token 先做无副作用粗校验，坏输入不触发依赖安装。
+# v6.15: 导入 token 在依赖安装前完成无副作用 Base64/JSON 最小预解析。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.14"
+readonly VERSION="v6.15"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -1691,38 +1691,44 @@ PYGEN
   return 0
 }
 
-precheck_import_token_shape(){
+extract_import_token_json_no_deps(){
   local raw="$1"
   [[ -n "$raw" ]] || die "需要 token 参数"
   raw=$(printf '%s' "$raw" | tr -d ' \n\r\t')
   (( ${#raw} <= 2048 )) || die "token 过长（${#raw} 字节），拒绝解析"
-  if [[ ! "$raw" =~ (eyJ|eyA)[A-Za-z0-9+/=]{20,} && ! "$raw" =~ ^[A-Za-z0-9+/=]{40,}$ ]]; then
+  local token=""
+  token=$(printf '%s' "$raw" | grep -Eo '(eyJ|eyA)[A-Za-z0-9+/=]{20,}|[A-Za-z0-9+/=]{40,}' | head -1 || true)
+  if [[ -z "$token" ]]; then
     die "token 形态非法，请从落地机复制完整的 Base64 导入 token"
   fi
+  local pad_len=$(( (4 - ${#token} % 4) % 4 )) pad="" decoded=""
+  if (( pad_len > 0 )); then
+    printf -v pad '%*s' "$pad_len" ''
+    pad=${pad// /=}
+  fi
+  decoded=$(printf '%s' "${token}${pad}" | base64 -d 2>/dev/null) \
+    || die "无法解析 Base64 token，请检查输入"
+  printf '%s' "$decoded" | grep -Eq '^[[:space:]]*\{.*\}[[:space:]]*$' \
+    || die "token 解码后不是 JSON 对象，请重新从落地机复制完整 token"
+  printf '%s' "$decoded" | grep -Eq '"ip"[[:space:]]*:' \
+    || die "token 预校验失败（ip 字段缺失）——请重新从落地机复制完整的导入命令"
+  printf '%s' "$decoded" | grep -Eq '"dom"[[:space:]]*:' \
+    || die "token 预校验失败（dom 字段缺失）——请重新从落地机复制完整的导入命令"
+  printf '%s' "$decoded"
 }
 
 import_token(){
   local raw="$1"
   [[ -n "$raw" ]] || die "需要 token 参数"
   raw=$(printf '%s' "$raw" | tr -d ' \n\r\t')
-  precheck_import_token_shape "$raw"
+  local json=""
+  json=$(extract_import_token_json_no_deps "$raw")
   check_deps
 
-  local json=""
-  json=$(printf '%s' "$raw" | python3 -c "
-import base64
+  json=$(printf '%s' "$json" | python3 -c "
 import json
-import re
 import sys
-raw = sys.stdin.read().strip()
-m = re.search(r'(?<![A-Za-z0-9+/=])(?:eyJ|eyA)[A-Za-z0-9+/=]{20,}(?![A-Za-z0-9+/=])', raw)
-if not m:
-    m = re.search(r'(?<![A-Za-z0-9+/=])[A-Za-z0-9+/=]{40,}(?![A-Za-z0-9+/=])', raw)
-if not m:
-    raise SystemExit(1)
-token = m.group(0)
-pad = '=' * (-len(token) % 4)
-decoded = base64.b64decode(token + pad).decode()
+decoded = sys.stdin.read()
 json.loads(decoded)
 print(decoded)
 " 2>/dev/null) || die "无法解析 Base64 token，请检查输入"
@@ -2274,6 +2280,9 @@ fresh_install(){
   if [[ -n "${LANDING_IP:-}" || -n "${LANDING_DOMAIN:-}" ]]; then
     die "非交互安装请使用 LANDING_TOKEN；LANDING_IP/LANDING_DOMAIN 缺少订阅凭据，拒绝继续"
   fi
+  if [[ -n "${LANDING_TOKEN:-}" ]]; then
+    extract_import_token_json_no_deps "$LANDING_TOKEN" >/dev/null
+  fi
   if [[ -n "${TRANSIT_AUTO_CONFIRM:-}" || -n "${LANDING_TOKEN:-}" ]]; then
     info "检测到自动化环境变量，跳过安装确认"
   else
@@ -2399,7 +2408,7 @@ main(){
   if [[ "${1:-}" == "--uninstall" ]]; then purge_all; exit 0; fi
   if [[ "${1:-}" == "--import" ]]; then
     # v2.32: --import 直接调用时加锁；通过 add_landing_route 间接调用时锁已由调用方持有
-    precheck_import_token_shape "${2:-}"
+    extract_import_token_json_no_deps "${2:-}" >/dev/null
     _acquire_lock; import_token "${2:-}"; _release_lock; exit 0
   fi
   if [[ "${1:-}" == "--status" ]]; then show_status; exit $?; fi
