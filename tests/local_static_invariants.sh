@@ -210,6 +210,10 @@ if 'type=tcp&alpn=#{urllib.parse.quote' in transit or 'type=tcp&alpn="\\n' in la
     die("Trojan-TCP links must not emit empty alpn")
 if 'type=tcp&alpn=http/1.0' in transit or 'type=tcp&alpn=http/1.0' in landing:
     die("Trojan-TCP links must not use alpn=http/1.0; local Xray test fails with current fallback split")
+if '&type=grpc&serviceName={pfx}-vg&authority={domain}&alpn=h2&mode=multi' not in transit:
+    die("transit VLESS-gRPC link must include authority=domain for HTTP/2 client compatibility")
+if 'f"&type=grpc&serviceName={pfx}-vg&authority={domain}&alpn=h2&mode=multi"' not in landing:
+    die("landing VLESS-gRPC link must include authority=domain for HTTP/2 client compatibility")
 if '-m comment --comment "xray-landing-transit" -j ACCEPT 2>/dev/null' not in landing:
     die("landing --status runtime whitelist check must match the managed comment-bearing rule")
 health_path = 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'

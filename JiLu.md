@@ -1601,3 +1601,40 @@
   - 本轮未重新 DD 全新安装；下一轮重点观察 11:30 之后 `transit-health` 是否还出现防火墙误报。
 - Commit:
   - 待提交 `fix: set health check cron path v6.28`
+
+## 2026-05-23 第 39 轮 - v6.29
+
+- 主笔：Codex/GPT-5.5
+- 审查者：用户实机客户端反馈；主笔现场复测与裁决。
+- 本轮目标：排查最新脚本安装后 VLESS-gRPC 客户端不通的问题，确认服务端链路并修复订阅兼容参数。
+- 接受意见：
+  - 用户反馈：落地机与中转机均使用最新脚本安装后，VLESS-gRPC 客户端测试不通。
+  - 现场证据：落地机 `xray-landing.service`、中转机 `nginx.service` 与两端健康检查均正常；落地配置中 `h2` fallback 指向内部 VLESS-gRPC 端口，内部 gRPC `serviceName` 与中转 `.meta/.map` 中的 `PFX` 一致。
+  - 实机 A/B：用落地机上的 Xray 临时客户端，经“落地机 -> 中转 443 -> 落地 8443 -> VLESS-gRPC”链路测试，当前参数和补充 `authority=域名` 的参数都能返回 HTTP 200；因此服务端路径可通，用户客户端更可能是导入后 HTTP/2 authority 兼容问题。
+- 拒绝意见：
+  - 不改服务端 fallback 拓扑，不恢复 Trojan-gRPC，不开放落地 8443 给全网；这些改动会增加风险或破坏现有已通协议。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转订阅生成与落地配对信息中的 VLESS-gRPC 链接补充 `authority={domain}`，让客户端 HTTP/2 `:authority` 明确等于证书域名。
+  - README 的节点导入提醒同步要求保留 `serviceName`、`authority=域名`、`alpn=h2` 和 `mode=multi`。
+  - 本地静态不变量新增检查，防止以后订阅生成丢失 gRPC `authority`。
+  - 两脚本版本统一提升到 `v6.29`。
+- 验证：
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - 实机验证：落地临时 Xray 客户端以 VLESS-gRPC 方式连接中转 443，HTTP 200；加 `authority=域名` 后同样 HTTP 200。
+  - 实机验证：中转健康检查返回 0；中转到落地后端 TCP/TLS 正常；本地电脑到中转 443 正确 SNI TLS 正常，错误 SNI 按预期失败。
+- 残留风险：
+  - 用户客户端需要重新导入 v6.29 生成的 VLESS-gRPC 节点，或手动给旧 gRPC 节点增加 `authority=域名` 后再测。
+- Commit:
+  - 待提交 `fix: add grpc authority to subscription v6.29`

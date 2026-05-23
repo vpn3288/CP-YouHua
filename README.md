@@ -2,7 +2,7 @@
 
 面向小白的中转机 + 落地机安装脚本。
 
-当前版本：`v6.28`
+当前版本：`v6.29`
 
 ## 这两个脚本分别做什么
 
@@ -119,7 +119,7 @@ bash install_transit.sh
 
 节点导入提醒：
 
-- VLESS-gRPC 节点需要保留 `alpn=h2` 和 `mode=multi`。
+- VLESS-gRPC 节点需要保留 `serviceName`、`authority=域名`、`alpn=h2` 和 `mode=multi`。
 - VLESS-WS 节点需要保留 `alpn=http/1.1` 和脚本生成的 `path`。
 - Trojan-TCP 节点需要保留 `alpn=http/1.1`，不要改成空 ALPN、`h2` 或 `http/1.0`。
 
