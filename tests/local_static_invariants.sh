@@ -104,10 +104,12 @@ if 'stale_swap_line=$(iptables -w 2 -L INPUT --line-numbers -n' not in transit:
     die("transit health check does not clean stale firewall swap jump by line number")
 if 'stale_swap_line=$($tool -w 2 -L INPUT --line-numbers -n' not in landing:
     die("landing health check does not clean stale firewall swap jump by line number")
-if '_transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW -s ${_tip}/32 -p tcp --dport ${LANDING_PORT}' not in landing:
-    die("landing persisted firewall transit rules must render the real landing port before template insertion")
+if '_transit_rules+="iptables -w 2 -A ${FW_CHAIN}-NEW -s ${_tip}/32 -p tcp --dport ${LANDING_PORT}' not in landing:
+    die("landing persisted firewall transit rules must render the real chain and landing port before template insertion")
 if '_transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW -s ${_tip}/32 -p tcp --dport __LANDING_PORT__' in landing:
     die("landing persisted firewall transit rules still contain a late __LANDING_PORT__ placeholder")
+if '_transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW' in landing:
+    die("landing persisted firewall dynamic rules must not carry __FW_CHAIN__ into TRANSIT_RULES")
 if 'repair_transit_maps_from_meta' not in transit:
     die("transit health check must repair missing/drifted .map files from .meta during long-running cron checks")
 if '.transit-map-repair.' not in transit:

@@ -1675,3 +1675,38 @@
   - 本轮未重新 DD 全新安装；已在当前中转机现场确认多落地导入路径恢复。仍需用户客户端按需重新导入包含 3 台落地机的订阅后做实际节点使用确认。
 - Commit:
   - 待提交 `fix: allow multiple transit landings v6.30`
+
+## 2026-05-23 第 41 轮 - v6.31
+
+- 主笔：Codex/GPT-5.5
+- 审查者：用户实机重启测试；主笔现场巡检与裁决。
+- 本轮目标：验证中转机和落地机重启后功能是否自动恢复，并修复落地机防火墙持久化恢复失败。
+- 接受意见：
+  - 用户触发重启测试后，现场巡检发现中转机 Nginx、443、黑洞监听、`.meta/.map` 七条路由一致性和健康检查均正常恢复。
+  - 现场证据：落地机 `xray-landing.service`、`nginx.service`、`cron.service` 均 active，Xray 配置校验 OK，但 `xray-landing-iptables-restore.service` failed，`INPUT` 缺少 `XRAY-LANDING` 跳转，8443 防火墙链未恢复。
+  - 代码证据：落地持久化脚本 `/etc/landing_manager/firewall-restore.sh` 中动态中转规则残留 `__FW_CHAIN__-NEW`，因为 `_transit_rules` 作为环境变量在 Python 模板替换之后才插入，内部占位符不会再被替换。
+- 拒绝意见：
+  - 不通过开放 8443 给全网解决；该问题是持久化脚本生成缺陷，必须保持“仅允许中转 IP 访问落地代理端口”的边界。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地 `_persist_iptables()` 生成 `_transit_rules` 时直接写入 `${FW_CHAIN}-NEW`，避免动态规则穿过 `__TRANSIT_RULES__` 后仍残留模板占位符。
+  - 额外端口动态规则同步使用 `${FW_CHAIN}-NEW`。
+  - 本地静态不变量新增检查，防止 `_transit_rules` 再携带 `__FW_CHAIN__-NEW`。
+  - 两脚本版本统一提升到 `v6.31`；中转脚本仅同步版本号。
+- 验证：
+  - 本地：`git status --short --branch`
+  - 本地：`bash -n install_transit.sh`
+  - 本地：`bash -n install_landing.sh`
+  - 实机重启后巡检：中转机 `nginx.service` active，443/127.0.0.1:9999 监听正常，`.meta=7`、`.map=7` 且投影一致，`transit-health-check.sh` 返回 0。
+  - 实机重启后巡检：落地机重启后复现 `xray-landing-iptables-restore.service` failed；现场修复持久化脚本占位符后，恢复服务 active，`INPUT -> XRAY-LANDING` 跳转存在，8443 仅允许中转 IP，`xray-landing-health-check.sh` 返回 0。
+- 残留风险：
+  - 现场已修复当前落地机的持久化脚本；还需在下一次落地机重启后复核 `xray-landing-iptables-restore.service` 仍为 active。
+- Commit:
+  - 待提交 `fix: restore landing firewall after reboot v6.31`
