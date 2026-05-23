@@ -19,7 +19,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 - 当前远端提交以 `git ls-remote origin refs/heads/main` 实时查询为准；不要在本指南中写死 hash，避免每次文档提交后事实漂移。
 - 中转脚本当前文件名: `install_transit.sh`
 - 落地脚本当前文件名: `install_landing.sh`
-- 两脚本头部版本: `v6.25`
+- 两脚本头部版本: `v6.26`
 - 当前工作区已通过 `git ls-files --eol` 验证为 LF；若未来出现 CRLF 并导致 `bash -n` 报 `$'{\r'`，列为 P0。
 
 第一轮真实优化已完成：
@@ -109,17 +109,17 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 ## 4. 当前脚本架构事实
 
-主笔每轮必须重新读取脚本，以下事实只描述当前 `v6.25` 脚本。
+主笔每轮必须重新读取脚本，以下事实只描述当前 `v6.26` 脚本。
 
 ### 4.1 中转脚本事实
 
 当前中转脚本头部写明：
 
-- `install_transit_v6.25.sh`
+- `install_transit_v6.26.sh`
 - 架构：CN2 GIA 纯 IPv4 中转机。
 - Nginx stream SNI 盲传。
 - 禁止代理核心和 IPv6 业务路径。
-- 当前版本说明：禁用 Debian Nginx 默认站点，避免中转机额外监听 80 端口。
+- 当前版本说明：同步落地 VLESS-gRPC 与 Trojan-TCP 的 ALPN 分流冲突修复；中转业务逻辑不变。
 
 关键结构：
 
@@ -160,12 +160,12 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 当前落地脚本头部写明：
 
-- `install_landing_v6.25.sh`
+- `install_landing_v6.26.sh`
 - 架构：美国落地机。
 - Xray-core 4 协议单端口回落。
 - Cloudflare DNS-01 证书。
 - 禁止 IPv6 业务路径。
-- 当前版本说明：同步中转禁用 Nginx 默认站点修复版本；落地业务逻辑不变。
+- 当前版本说明：实机修复 VLESS-gRPC 与 Trojan-TCP 的 ALPN 分流冲突。
 
 关键结构：
 
@@ -311,7 +311,7 @@ WSL 中的 Codex/GPT-5.5 与 Claude Code/Claude 4.7 是两个审查者，不是�
 
 每次真实优化后，两脚本版本必须统一递增。
 
-当前基线是 `v6.25`。下一轮真实优化应统一为 `v6.26`。默认真实修复要涨版本。
+当前基线是 `v6.26`。下一轮真实优化应统一为 `v6.27`。默认真实修复要涨版本。
 
 同步范围：
 

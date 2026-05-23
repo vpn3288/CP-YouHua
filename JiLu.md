@@ -1490,3 +1490,38 @@
   - 本轮未重新 DD 全新安装；继续通过小时巡检观察中转默认站点是否保持禁用、IPv6 是否仍无公网地址。
 - Commit:
   - 待提交 `fix: disable transit nginx default site v6.25`
+
+## 2026-05-23 第 36 轮 - v6.26
+
+- 主笔：Codex/GPT-5.5
+- 审查者：用户实机反馈；主笔现场矩阵测试裁决。
+- 本轮目标：修复 Trojan-TCP 已通后 VLESS-gRPC 不通，并确保 4 个节点同时可用。
+- 接受意见：
+  - 用户反馈：Trojan-TCP 已通，但 VLESS-gRPC 不通，需要进入中转机和落地机现场排查，并在本地客户端真实验证 4 个节点。
+  - 本地 Xray-core 26.3.27 矩阵测试证明：落地 TLS 主入口若把 `h2` fallback 精确限制到 `/<service>/Tun` 或 `/<service>/TunMulti`，VLESS-gRPC 会收到 HTTP/1.1 首包并失败；恢复 `alpn=h2` 泛匹配后 VLESS-gRPC 可通。
+  - 同一矩阵测试证明：Trojan-TCP 需要显式 `alpn=http/1.1`，否则会误协商到 h2 或使用 http/1.0 后失败；`http/1.1` 且无 WS path 时会正确落入 Trojan catch-all。
+- 拒绝意见：
+  - 拒绝继续使用 `h2` path 精确匹配修复 Trojan-TCP；实测会破坏 VLESS-gRPC。
+  - 拒绝把 Trojan-TCP 保持为 `alpn=http/1.0`；本地客户端实测失败。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地 Xray 配置生成恢复 `{"alpn":"h2","dest":PORT_VLESS_GRPC}` 泛匹配，保障 VLESS-gRPC `Tun/TunMulti` 客户端都能进入内层 gRPC 入站。
+  - 中转订阅生成与落地配对信息中的 Trojan-TCP 链接改为显式 `alpn=http/1.1`，避开 h2(gRPC) fallback，同时因没有 WS path 会落入 Trojan catch-all。
+  - 本地静态不变量改为禁止 gRPC fallback 精确 path、禁止 Trojan-TCP `alpn=http/1.0`。
+  - 已在落地机现场应用等价修复并重启 `xray-landing.service`。
+- 验证：
+  - 实机验证：中转机 Nginx active，`nginx -t` 通过，`.meta/.map` 一致。
+  - 实机验证：落地机 `xray-landing.service` active，`XRAY_LOCATION_ASSET=/usr/local/share/xray-landing /usr/local/bin/xray-landing run -test -config /etc/xray-landing/config.json` 通过。
+  - 本地客户端验证：Windows Xray-core 26.3.27 逐个测试 VLESS Vision、VLESS gRPC、VLESS WS、Trojan-TCP，4 个协议均成功通过中转出站，出口 IP 均为落地机 `47.251.82.237`。
+  - 待最终提交前继续运行 `bash -n`、`bash tests/local_static_invariants.sh`、`git diff --check`。
+- 残留风险：
+  - 本轮未重新 DD 全新安装；已做现场修复和本地客户端真实连接验证。用户客户端需要重新导入 v6.26 生成的订阅，或手动把 Trojan-TCP 节点 ALPN 改为 `http/1.1`。
+- Commit:
+  - 待提交 `fix: resolve grpc trojan alpn split v6.26`

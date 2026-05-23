@@ -116,6 +116,10 @@ if 'disable_packaged_nginx_default_site' not in transit:
     die("transit install must disable Debian nginx default site to avoid extra port 80 listeners")
 if 'NGINX_DEFAULT_SITE_DISABLED_FLAG' not in transit:
     die("transit default-site disable must leave a marker for uninstall restore")
+if '{"alpn": "h2", "dest": PORT_VLESS_GRPC, "xver": 0}' not in landing:
+    die("landing VLESS-gRPC fallback must keep generic h2 routing for Xray gRPC clients")
+if 'path": f"/{PFX}-vg/Tun"' in landing or 'path": f"/{PFX}-vg/TunMulti"' in landing:
+    die("landing VLESS-gRPC fallback must not use exact Tun/TunMulti path matching")
 
 def between(text: str, start: str, end: str, name: str) -> str:
     i = text.find(start)
@@ -200,12 +204,12 @@ if 'validate_ipv4 "$pub_ip" || die' not in landing:
     die("print_pairing_info does not enforce real public IPv4 token IP")
 if 'ip.is_private' not in transit:
     die("transit token pre-parse does not reject private IP addresses")
-if 'type=tcp&alpn=http/1.0' not in transit or 'type=tcp&alpn=http/1.0' not in landing:
-    die("Trojan-TCP links must use explicit alpn=http/1.0")
+if 'type=tcp&alpn=http/1.1' not in transit or 'type=tcp&alpn=http/1.1' not in landing:
+    die("Trojan-TCP links must use explicit alpn=http/1.1")
 if 'type=tcp&alpn=#{urllib.parse.quote' in transit or 'type=tcp&alpn="\\n' in landing:
     die("Trojan-TCP links must not emit empty alpn")
-if '{"alpn": "h2", "path": f"/{PFX}-vg", "dest": PORT_VLESS_GRPC' not in landing:
-    die("landing h2 fallback must match gRPC path so Trojan-TCP h2 clients fall through to Trojan")
+if 'type=tcp&alpn=http/1.0' in transit or 'type=tcp&alpn=http/1.0' in landing:
+    die("Trojan-TCP links must not use alpn=http/1.0; local Xray test fails with current fallback split")
 
 print(f"OK: static invariants for {tv}")
 PY

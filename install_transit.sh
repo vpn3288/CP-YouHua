@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.25.sh — 中转机安装脚本 v6.25
+# install_transit_v6.26.sh — 中转机安装脚本 v6.26
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.25: 禁用 Debian Nginx 默认站点，避免中转机额外监听 80 端口。
+# v6.26: 同步落地 VLESS-gRPC 与 Trojan-TCP 的 ALPN 分流冲突修复；中转业务逻辑不变。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.25"
+readonly VERSION="v6.26"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -1793,9 +1793,9 @@ uris = [
     f'vless://{vu}@{ip}:{port}?encryption=none&flow=xtls-rprx-vision&security=tls&sni={domain}&fp={fp_vision}&type=tcp&mux=0#{urllib.parse.quote(lbl["v"]+domain)}',
     f'vless://{vu}@{ip}:{port}?encryption=none&security=tls&sni={domain}&fp={fp_grpc}&type=grpc&serviceName={pfx}-vg&alpn=h2&mode=multi#{urllib.parse.quote(lbl["vg"]+domain)}',
     f'vless://{vu}@{ip}:{port}?encryption=none&security=tls&sni={domain}&fp={fp_ws}&type=ws&path=%2F{pfx}-vw&host={domain}&alpn=http/1.1#{urllib.parse.quote(lbl["w"]+domain)}',
-    # 4. Trojan-TCP: alpn=http/1.0 可避开 h2(gRPC) 与 http/1.1(WS) fallback，
-    # 同时避免部分客户端把空 alpn 参数解析成不可用配置。
-    f'trojan://{urllib.parse.quote(tp)}@{ip}:{port}?security=tls&sni={domain}&fp={fp_tcp}&type=tcp&alpn=http/1.0#{urllib.parse.quote(lbl["t"]+domain)}',
+    # 4. Trojan-TCP: alpn=http/1.1 可避开 h2(gRPC) fallback；
+    # 未带 WS path 时仍会落入 Trojan catch-all，同时避免空 alpn 在部分客户端中不可用。
+    f'trojan://{urllib.parse.quote(tp)}@{ip}:{port}?security=tls&sni={domain}&fp={fp_tcp}&type=tcp&alpn=http/1.1#{urllib.parse.quote(lbl["t"]+domain)}',
 ]
 print(base64.b64encode('\n'.join(uris).encode()).decode())
 PYGEN

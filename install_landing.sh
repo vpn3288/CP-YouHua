@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.25.sh — 落地机安装脚本 v6.25
+# install_landing_v6.26.sh — 落地机安装脚本 v6.26
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.25: 同步中转禁用 Nginx 默认站点修复版本；落地业务逻辑不变。
+# v6.26: 实机修复 VLESS-gRPC 与 Trojan-TCP 的 ALPN 分流冲突。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.25"
+readonly VERSION="v6.26"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -1564,8 +1564,10 @@ cfg = {
                     # Xray schema: inbounds.streamSettings.tlsSettings.alpn → array (correct above).
                     #              inbounds.settings.fallbacks[].alpn       → string (fixed here).
                     # Arrays caused status=23 from Xray's JSON schema validator.
-                    # [v5.30-CRITICAL-3] 删除Trojan-gRPC fallback - 两个alpn=h2规则冲突，只保留VLESS-gRPC
-                    {"alpn": "h2", "path": f"/{PFX}-vg", "dest": PORT_VLESS_GRPC,  "xver": 0},
+                    # gRPC 客户端真实 HTTP/2 path 会落在 /<service>/Tun 或 /<service>/TunMulti。
+                    # Xray fallback 的 path 精确匹配会导致当前 gRPC 客户端收到 HTTP/1.1 首包而失败；
+                    # 这里保留 h2 泛匹配，并由 Trojan-TCP 节点显式 alpn=http/1.1 避开 h2。
+                    {"alpn": "h2", "dest": PORT_VLESS_GRPC, "xver": 0},
                     # WS: alpn=http/1.1 + path match; Trojan-TCP: no alpn/path = catch-all
                     {"alpn": "http/1.1", "path": f"/{PFX}-vw", "dest": PORT_VLESS_WS, "xver": 0},
                     {"dest": PORT_TROJAN_TCP, "xver": 0}
@@ -3382,10 +3384,9 @@ uris = [
      f"?encryption=none&security=tls&sni={domain}&fp={fp_ws}"
      f"&type=ws&path=%2F{pfx}-vw&host={domain}&alpn=http/1.1"
      f"#{urllib.parse.quote(lbl_vws+domain)}"),
-    # Trojan-TCP 使用 http/1.0 ALPN：主入口没有 http/1.0 专用 fallback，
-    # 会落入 Trojan catch-all；避免空 alpn 参数在部分客户端中不可用。
+    # Trojan-TCP 使用 http/1.1 ALPN：避开 h2(gRPC) fallback；未带 WS path 时仍会落入 Trojan catch-all。
     (f"trojan://{urllib.parse.quote(trojan_pass)}@{transit_ip}:{port}"
-     f"?security=tls&sni={domain}&fp={fp_tcp}&type=tcp&alpn=http/1.0"
+     f"?security=tls&sni={domain}&fp={fp_tcp}&type=tcp&alpn=http/1.1"
      f"#{urllib.parse.quote(lbl_ttcp+domain)}"),
 ]
 print(base64.b64encode("\n".join(uris).encode()).decode())
