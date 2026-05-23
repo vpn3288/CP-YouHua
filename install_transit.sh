@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.29.sh — 中转机安装脚本 v6.29
+# install_transit_v6.30.sh — 中转机安装脚本 v6.30
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.29: 为 VLESS-gRPC 订阅补充 authority，提升客户端 HTTP/2 导入兼容性。
+# v6.30: 修复中转机已有落地记录后新增第二台/第三台时查重无匹配触发 pipefail 退出的问题。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.29"
+readonly VERSION="v6.30"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -1988,7 +1988,9 @@ print(decoded)
   local _existing_node
   # [BUG-4-FIX] 确保目录存在再执行find，避免set -e导致脚本退出
   if [[ -d "$CONF_DIR" ]]; then
-    _existing_node=$(find "$CONF_DIR" -name "*.meta" -type f -exec grep -l "^DOMAIN=${dom}$" {} + 2>/dev/null | head -1)
+    # A non-matching grep is the normal path for adding a second/new landing.
+    # With pipefail enabled, neutralize that no-match status so import can continue.
+    _existing_node=$(find "$CONF_DIR" -name "*.meta" -type f -exec grep -l "^DOMAIN=${dom}$" {} + 2>/dev/null | head -1 || true)
   else
     _existing_node=""
   fi

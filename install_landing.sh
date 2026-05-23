@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.29.sh — 落地机安装脚本 v6.29
+# install_landing_v6.30.sh — 落地机安装脚本 v6.30
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.29: 为 VLESS-gRPC 订阅补充 authority，提升客户端 HTTP/2 导入兼容性。
+# v6.30: 同步版本号；本轮业务修复在中转脚本，多落地导入查重 no-match 退出。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.29"
+readonly VERSION="v6.30"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }

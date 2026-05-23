@@ -141,6 +141,8 @@ if import_body.find('extract_import_token_json_no_deps "$raw"') < 0:
     die("import_token does not parse token before dependencies")
 if import_body.find('extract_import_token_json_no_deps "$raw"') > import_body.find('check_deps'):
     die("import_token calls check_deps before token parse")
+if '_existing_node=$(find "$CONF_DIR" -name "*.meta" -type f -exec grep -l "^DOMAIN=${dom}$" {} + 2>/dev/null | head -1 || true)' not in transit:
+    die("transit import must tolerate no existing-domain match when adding the second landing")
 
 fresh_preflight = between(transit, 'fresh_install(){', 'check_deps', "transit fresh preflight")
 if fresh_preflight.find('extract_import_token_json_no_deps "$LANDING_TOKEN" >/dev/null') < 0:

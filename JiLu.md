@@ -1638,3 +1638,40 @@
   - 用户客户端需要重新导入 v6.29 生成的 VLESS-gRPC 节点，或手动给旧 gRPC 节点增加 `authority=域名` 后再测。
 - Commit:
   - 待提交 `fix: add grpc authority to subscription v6.29`
+
+## 2026-05-23 第 40 轮 - v6.30
+
+- 主笔：Codex/GPT-5.5
+- 审查者：用户实机复现；主笔现场跟踪与裁决。
+- 本轮目标：修复中转机无法增加第二台、第三台落地机路由的问题。
+- 接受意见：
+  - 用户实机复现：中转菜单粘贴第二台/第三台落地机 Token 后只输出 `200 OK` 与时间同步正常，重新进入菜单仍只显示第一台落地机。
+  - 现场证据：中转机 `/etc/transit_manager/conf` 与 `/etc/nginx/stream-snippets` 均只有第一台的 `.meta/.map`；用第二台 Token 直接执行 `--import` 复现退出码 1，未新增记录。
+  - 代码证据：`import_token()` 中查重语句 `_existing_node=$(find ... -exec grep -l ... | head -1)` 在已有 `.meta` 但新域名无匹配时，`grep` 返回 1 会被 `set -euo pipefail` 当成失败，导致脚本在正常“未重复”路径直接退出。
+- 拒绝意见：
+  - 不改 Nginx stream 拓扑、不改 Token 格式、不放宽 IPv4-only 与防火墙策略；现场问题是 Bash 查重 no-match 退出，不是路由架构问题。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转 `import_token()` 的已有域名查重命令在 `head -1` 后补 `|| true`，让“没有重复域名”作为正常结果继续执行。
+  - 本地静态不变量新增检查，防止以后删掉该 no-match 保护导致第二台落地机再次无法导入。
+  - 两脚本版本统一提升到 `v6.30`；落地脚本仅同步版本号，落地业务逻辑不变。
+- 验证：
+  - `git pull --ff-only`
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `git diff --check`
+  - 实机复现：v6.29 中转机已有第一台 `.meta` 时导入第二台 Token 退出码 1，且 `.meta/.map` 数量仍为 1。
+  - 实机验证：把 v6.30 中转脚本临时同步到中转机后，第二台 `ab1.998488.xyz` 与第三台 `al.998488.xyz` 均导入成功，退出码 0；现场 `.meta/.map` 数量从 1 增至 3，`nginx -t` 通过，`nginx.service` active。
+- 残留风险：
+  - 本轮未重新 DD 全新安装；已在当前中转机现场确认多落地导入路径恢复。仍需用户客户端按需重新导入包含 3 台落地机的订阅后做实际节点使用确认。
+- Commit:
+  - 待提交 `fix: allow multiple transit landings v6.30`
