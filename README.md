@@ -2,7 +2,7 @@
 
 面向小白的中转机 + 落地机安装脚本。
 
-当前版本：`v6.31`
+当前版本：`v6.32`
 
 ## 这两个脚本分别做什么
 
@@ -179,6 +179,34 @@ bash install_landing.sh --uninstall
 ```
 
 卸载时需要按提示输入确认词。脚本会尽量清理自己创建的 Nginx/Xray/systemd/iptables/cron/logrotate/管理目录等内容。
+
+## 升级已有机器
+
+已有中转机或落地机不用卸载重装，直接重新运行最新版脚本即可。
+
+中转机：
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/vpn3288/CP-YouHua/main/install_transit.sh)
+```
+
+落地机：
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/vpn3288/CP-YouHua/main/install_landing.sh)
+```
+
+落地机从旧版本升级时，脚本会读取已有 `manager.conf` 和节点文件；如果发现防火墙开机恢复脚本仍有旧模板占位符、恢复服务失败、INPUT 跳转缺失或 8443 白名单缺失，会自动原地重建防火墙运行态和开机恢复脚本。
+
+升级后建议验证：
+
+```bash
+systemctl is-active xray-landing
+systemctl is-active nginx
+systemctl is-active xray-landing-iptables-restore.service
+iptables -S INPUT | grep XRAY-LANDING
+iptables -S XRAY-LANDING | grep 8443
+```
 
 ## 重新 DD 系统后怎么做
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.31.sh — 落地机安装脚本 v6.31
+# install_landing_v6.32.sh — 落地机安装脚本 v6.32
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.31: 修复落地机重启后防火墙持久化脚本动态规则残留模板占位符导致恢复失败的问题。
+# v6.32: 旧落地机运行新版脚本时自动重建含占位符的防火墙持久化脚本。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.31"
+readonly VERSION="v6.32"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -2223,6 +2223,42 @@ landing_firewall_has_transit_rule(){
   landing_runtime_has_transit_rule "$tip" && landing_restore_has_transit_rule "$tip"
 }
 
+landing_firewall_needs_auto_repair(){
+  local _fw_script="${MANAGER_BASE}/firewall-restore.sh"
+  [[ -f "$MANAGER_CONFIG" ]] || return 1
+  [[ -f "$_fw_script" ]] || return 0
+  grep -qE '__FW_CHAIN__|__FW_CHAIN6__|__LANDING_PORT__' "$_fw_script" 2>/dev/null && return 0
+  systemctl is-active --quiet xray-landing-iptables-restore.service 2>/dev/null || return 0
+  iptables -S INPUT 2>/dev/null | grep -q -- "-j ${FW_CHAIN}" || return 0
+
+  local _tip _checked=0
+  while IFS= read -r _tip; do
+    [[ -n "$_tip" ]] || continue
+    (( ++_checked )) || true
+    landing_firewall_has_transit_rule "$_tip" || return 0
+  done < <(find "${MANAGER_BASE}/nodes" -name "*.conf" -not -name ".tmp-node-*.conf" -type f 2>/dev/null \
+    -exec awk -F= '$1=="TRANSIT_IP"{print $2}' {} + | sort -u)
+  (( _checked > 0 )) || return 0
+  return 1
+}
+
+ensure_landing_firewall_boot_restore_current(){
+  landing_firewall_needs_auto_repair || return 0
+  warn "检测到落地机防火墙运行态/开机恢复脚本需要升级，正在原地重建..."
+  _acquire_lock
+  local _repair_ok=0
+  if ( setup_firewall ) \
+    && ( save_manager_config ) \
+    && systemctl reset-failed xray-landing-iptables-restore.service 2>/dev/null \
+    && systemctl restart xray-landing-iptables-restore.service 2>/dev/null \
+    && systemctl is-active --quiet xray-landing-iptables-restore.service 2>/dev/null; then
+    _repair_ok=1
+  fi
+  _release_lock
+  (( _repair_ok == 1 )) || die "防火墙开机恢复脚本自动升级失败，请执行 bash $0 --status 查看详情"
+  success "防火墙运行态与开机恢复脚本已升级到 ${VERSION}"
+}
+
 
 _persist_iptables(){
   local ssh_port="${1:-22}"
@@ -4279,6 +4315,7 @@ main(){
         exit 1
       fi
     fi
+    ensure_landing_firewall_boot_restore_current
     installed_menu
   else
     fresh_install

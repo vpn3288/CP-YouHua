@@ -110,6 +110,12 @@ if '_transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW -s ${_tip}/32 -p tcp --dp
     die("landing persisted firewall transit rules still contain a late __LANDING_PORT__ placeholder")
 if '_transit_rules+="iptables -w 2 -A __FW_CHAIN__-NEW' in landing:
     die("landing persisted firewall dynamic rules must not carry __FW_CHAIN__ into TRANSIT_RULES")
+if 'ensure_landing_firewall_boot_restore_current' not in landing:
+    die("landing existing installs must auto-repair stale firewall boot restore scripts on startup")
+if 'grep -qE \'__FW_CHAIN__|__FW_CHAIN6__|__LANDING_PORT__\'' not in landing:
+    die("landing firewall auto-repair must detect stale template placeholders in firewall-restore.sh")
+if 'ensure_landing_firewall_boot_restore_current\n    installed_menu' not in landing:
+    die("landing installed startup path must repair firewall boot restore before opening the menu")
 if 'repair_transit_maps_from_meta' not in transit:
     die("transit health check must repair missing/drifted .map files from .meta during long-running cron checks")
 if '.transit-map-repair.' not in transit:

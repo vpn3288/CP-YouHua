@@ -1710,3 +1710,37 @@
   - 现场已修复当前落地机的持久化脚本；还需在下一次落地机重启后复核 `xray-landing-iptables-restore.service` 仍为 active。
 - Commit:
   - 待提交 `fix: restore landing firewall after reboot v6.31`
+
+## 2026-05-23 第 42 轮 - v6.32
+
+- 主笔：Codex/GPT-5.5
+- 审查者：用户多落地机升级复现；主笔裁决。
+- 本轮目标：修复旧落地机从 v6.30 运行 v6.31 时不会自动重写旧防火墙持久化脚本的问题。
+- 接受意见：
+  - 用户实机复现：一台已现场修过的落地机正常，但其他旧落地机运行 v6.31 后仍显示 `xray-landing-iptables-restore.service failed`，`INPUT` 无 `XRAY-LANDING` 跳转，`/etc/landing_manager/firewall-restore.sh` 仍含 `__FW_CHAIN__-NEW`。
+  - 代码证据：v6.31 只修复 `_persist_iptables()` 后续生成的新脚本；旧机器进入菜单或显示节点信息时只 `load_manager_config`，不会调用 `setup_firewall()` 重建旧持久化脚本。
+- 拒绝意见：
+  - 不要求用户卸载重装；旧机已有 manager.conf、节点文件、证书和 Xray 配置，正确修复路径是原地检测并重建防火墙运行态与开机恢复脚本。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 落地脚本新增 `landing_firewall_needs_auto_repair()`，检测旧持久化脚本中的 `__FW_CHAIN__`、`__FW_CHAIN6__`、`__LANDING_PORT__` 残留，以及恢复服务失败、INPUT 跳转缺失、运行链/恢复脚本白名单缺失。
+  - 落地脚本新增 `ensure_landing_firewall_boot_restore_current()`，在已安装入口进入管理菜单前自动持锁执行 `setup_firewall()`，重建运行态与 `/etc/landing_manager/firewall-restore.sh`，并重启 `xray-landing-iptables-restore.service` 做验收。
+  - 自动修复成功后 `save_manager_config()` 会把 `MARKER_VERSION` 更新为当前版本，减少旧版本警告。
+  - README 新增“升级已有机器”说明，明确不用卸载重装，直接运行最新版脚本即可触发旧防火墙脚本修复。
+  - 两脚本版本统一提升到 `v6.32`；中转脚本仅同步版本号。
+- 验证：
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+- 残留风险：
+  - 本轮是针对用户提供的旧机复现补自动升级路径；需在一台仍含 `__FW_CHAIN__` 的旧落地机上运行 v6.32，确认脚本进入菜单前自动修复并使恢复服务 active。
+- Commit:
+  - 待提交 `fix: auto repair landing firewall upgrade v6.32`
