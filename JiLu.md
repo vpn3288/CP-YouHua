@@ -1562,3 +1562,42 @@
   - 本轮未重新 DD 全新安装；继续小时巡检观察中转健康检查是否还出现防火墙误报日志。
 - Commit:
   - 待提交 `fix: match landing firewall status rule v6.27`
+
+## 2026-05-23 第 38 轮 - v6.28
+
+- 主笔：Codex/GPT-5.5
+- 审查者：心跳自动化实机巡检；主笔裁决。
+- 本轮目标：修复中转机 cron 环境下健康检查误报防火墙规则缺失的问题。
+- 接受意见：
+  - 小时巡检发现中转机 `transit-health` 在 10:30 与 11:00 定时执行时反复记录 `防火墙443规则丢失`、`防火墙UDP 443规则丢失`、`INPUT跳转规则丢失`。
+  - 同一时刻现场探针显示 `INPUT` 跳转、UDP 443 DROP 和 TCP 443 ACCEPT 规则都存在；手动运行 `/usr/local/bin/transit-health-check.sh` 不再产生日志。
+  - 代码证据：生成的健康检查脚本未设置 `PATH`，cron 环境可能缺少 `/usr/sbin` 与 `/sbin`，导致 `iptables/nginx` 等命令在定时任务中解析不稳定，从而触发误恢复日志。
+- 拒绝意见：
+  - 不改防火墙规则、不放宽中转端口策略、不新增服务；现场运行链正确，本轮只修 cron 运行环境。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - 中转生成的 `/usr/local/bin/transit-health-check.sh` 在 `set -euo pipefail` 后显式设置 `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`。
+  - 落地生成的 `/usr/local/bin/xray-landing-health-check.sh` 同步设置相同 PATH，避免未来 cron 环境下 `iptables/ip6tables/ss/openssl` 解析差异。
+  - 本地静态不变量新增检查，要求两份生成健康检查脚本都包含 sbin PATH。
+  - 两脚本版本统一提升到 `v6.28`。
+- 验证：
+  - `git pull --ff-only`（直连 GitHub 失败后，通过临时本地 Xray HTTP 代理完成，结果 Already up to date）
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+  - 实机验证：中转机手动运行健康检查返回 0 且不再产生新 `transit-health` 误报；中转 Nginx active，`.meta/.map` 一致，TCP 443 与 UDP 443 DROP 均存在。
+  - 实机验证：落地机 Xray active，配置校验通过，`--status` 整体一致，证书剩余约 89 天。
+- 残留风险：
+  - 本轮未重新 DD 全新安装；下一轮重点观察 11:30 之后 `transit-health` 是否还出现防火墙误报。
+- Commit:
+  - 待提交 `fix: set health check cron path v6.28`

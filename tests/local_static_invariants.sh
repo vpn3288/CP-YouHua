@@ -212,6 +212,9 @@ if 'type=tcp&alpn=http/1.0' in transit or 'type=tcp&alpn=http/1.0' in landing:
     die("Trojan-TCP links must not use alpn=http/1.0; local Xray test fails with current fallback split")
 if '-m comment --comment "xray-landing-transit" -j ACCEPT 2>/dev/null' not in landing:
     die("landing --status runtime whitelist check must match the managed comment-bearing rule")
+health_path = 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+if health_path not in transit or health_path not in landing:
+    die("generated health checks must set PATH with sbin for cron environments")
 
 print(f"OK: static invariants for {tv}")
 PY

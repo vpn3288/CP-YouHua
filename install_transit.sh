@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_transit_v6.27.sh — 中转机安装脚本 v6.27
+# install_transit_v6.28.sh — 中转机安装脚本 v6.28
 # 架构: CN2 GIA 纯 IPv4 中转机；Nginx stream SNI 盲传；禁止代理核心和 IPv6 业务路径。
-# v6.27: 同步落地 --status 白名单误报修复版本；中转业务逻辑不变。
+# v6.28: 修复 cron 环境 PATH 缺少 sbin 导致健康检查误报防火墙丢失。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.27"
+readonly VERSION="v6.28"
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
@@ -1074,6 +1074,7 @@ setup_health_check_transit(){
 #!/bin/bash
 # [S1-HIGH] 健康检查脚本 - 确保长期稳定运行
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # 检查 Nginx 服务状态
 if ! systemctl is-active --quiet nginx; then
