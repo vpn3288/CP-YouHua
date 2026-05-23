@@ -1525,3 +1525,40 @@
   - 本轮未重新 DD 全新安装；已做现场修复和本地客户端真实连接验证。用户客户端需要重新导入 v6.26 生成的订阅，或手动把 Trojan-TCP 节点 ALPN 改为 `http/1.1`。
 - Commit:
   - 待提交 `fix: resolve grpc trojan alpn split v6.26`
+
+## 2026-05-23 第 37 轮 - v6.27
+
+- 主笔：Codex/GPT-5.5
+- 审查者：心跳自动化实机巡检；主笔裁决。
+- 本轮目标：修复落地机 `--status` 对中转白名单运行链的误报，避免长期巡检把正常防火墙状态判成分裂。
+- 接受意见：
+  - 小时巡检发现落地机 `bash /root/install_landing.sh --status` 报 `运行链白名单: ✗ 38.59.243.23/32:8443 缺失或端口漂移`，但现场 `iptables -S XRAY-LANDING` 明确存在 `-s 38.59.243.23/32 --dport 8443 -m comment --comment xray-landing-transit -j ACCEPT`。
+  - 代码证据：`landing_runtime_has_transit_rule()` 使用 `iptables -C ... -j ACCEPT`，没有带上脚本实际写入规则中的 `-m comment --comment "xray-landing-transit"`；在当前 iptables/nft 环境下该不完整匹配返回 1，导致只读状态检查误报。
+- 拒绝意见：
+  - 不重建防火墙、不放宽落地端口访问范围；现场运行链和恢复脚本都已有正确白名单，本轮只修只读检查逻辑。
+- 修改文件：
+  - `install_transit.sh`
+  - `install_landing.sh`
+  - `tests/local_static_invariants.sh`
+  - `README.md`
+  - `guides/main_writer_task_guide.md`
+  - `guides/reviewer_task_guide.md`
+  - `JiLu.md`
+- 真实改动：
+  - `landing_runtime_has_transit_rule()` 的 `iptables -C` 补齐 `-m comment --comment "xray-landing-transit"`，与脚本创建的运行链规则完全一致。
+  - 本地静态不变量新增检查，防止以后再次把该状态检查改回不完整匹配。
+  - 两脚本版本统一提升到 `v6.27`；中转脚本仅同步版本，业务逻辑不变。
+  - 已把 v6.27 脚本同步到落地机 `/root/install_landing.sh`，并验证 `--status` 不再误报白名单缺失。
+- 验证：
+  - `git pull --ff-only`（直连 GitHub 失败后，通过临时本地 Xray HTTP 代理完成，结果 Already up to date）
+  - `git status --short --branch`
+  - `git ls-files --eol`
+  - `bash -n install_transit.sh`
+  - `bash -n install_landing.sh`
+  - `bash tests/local_static_invariants.sh`
+  - `git diff --check`
+  - 实机验证：落地机 Xray active，配置校验通过；`--status` 整体状态一致；中转机 Nginx active，`.meta/.map` 一致，TCP 443 和 UDP 443 DROP 存在。
+- 残留风险：
+  - 本轮未重新 DD 全新安装；继续小时巡检观察中转健康检查是否还出现防火墙误报日志。
+- Commit:
+  - 待提交 `fix: match landing firewall status rule v6.27`

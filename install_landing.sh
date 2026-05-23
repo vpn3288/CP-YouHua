@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
-# install_landing_v6.26.sh — 落地机安装脚本 v6.26
+# install_landing_v6.27.sh — 落地机安装脚本 v6.27
 # 架构: 美国落地机；Xray-core 4 协议单端口回落；Cloudflare DNS-01 证书；禁止 IPv6 业务路径。
-# v6.26: 实机修复 VLESS-gRPC 与 Trojan-TCP 的 ALPN 分流冲突。
+# v6.27: 修复落地 --status 对中转白名单运行链的误报。
 # 历史版本细节请查看 Git 提交记录；脚本头部只保留当前维护所需事实，避免旧协议/旧 IPv6 说明误导。
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-readonly VERSION="v6.26"
+readonly VERSION="v6.27"
 
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
@@ -2204,7 +2204,8 @@ setup_firewall(){
 
 landing_runtime_has_transit_rule(){
   local tip="$1"
-  iptables -w 2 -C "$FW_CHAIN" -s "${tip}/32" -p tcp --dport "$LANDING_PORT" -j ACCEPT 2>/dev/null
+  iptables -w 2 -C "$FW_CHAIN" -s "${tip}/32" -p tcp --dport "$LANDING_PORT" \
+    -m comment --comment "xray-landing-transit" -j ACCEPT 2>/dev/null
 }
 
 landing_restore_has_transit_rule(){
